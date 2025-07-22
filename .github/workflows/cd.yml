@@ -48,6 +48,9 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
 
+      - name: Install rsync
+        run: sudo apt-get update && sudo apt-get install -y rsync
+        
       - name: Sync compose & nginx to VM
         run: |
           rsync -avz -e "ssh -i ~/.ssh/id_rsa" \
