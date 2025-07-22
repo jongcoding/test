@@ -9,8 +9,7 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v2
@@ -27,9 +26,6 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/myflask:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/myflask:${{ github.sha }}
 
-      - name: Log out from Docker Hub
-        run: docker logout
-
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -38,8 +34,7 @@ jobs:
       REMOTE_APP_DIR:     ${{ secrets.REMOTE_APP_DIR }}
 
     steps:
-      - name: Check out code (compose/nginx files)
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Prepare SSH
         run: |
@@ -48,12 +43,9 @@ jobs:
           chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Install rsync
-        run: sudo apt-get update && sudo apt-get install -y rsync
-        
-      - name: Sync compose & nginx to VM
+      - name: Copy files to VM (scp)
         run: |
-          rsync -avz -e "ssh -i ~/.ssh/id_rsa" \
+          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -r \
             docker-compose.yml docker-compose.prod.yml nginx \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/
 
