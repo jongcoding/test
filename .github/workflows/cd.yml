@@ -111,11 +111,22 @@ jobs:
       # 프로덕션용 Compose & Nginx 템플릿 전송
       - name: Copy production assets to VM
         run: |
-          export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
-          scp docker-compose.prod.yml \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"$REMOTE_APP_DIR/"
-          scp nginx/default.conf.template \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"$REMOTE_APP_DIR/nginx/"
+          # 효율적인 한 번의 SSH 세션으로 모든 파일 전송
+          {
+            echo "# Transferring docker-compose.prod.yml"
+            echo "cat > '${{ secrets.REMOTE_APP_DIR }}/docker-compose.prod.yml' << 'COMPOSE_EOF'"
+            cat docker-compose.prod.yml
+            echo "COMPOSE_EOF"
+            echo ""
+            echo "# Transferring nginx config template"  
+            echo "cat > '${{ secrets.REMOTE_APP_DIR }}/nginx/default.conf.template' << 'NGINX_EOF'"
+            cat nginx/default.conf.template
+            echo "NGINX_EOF"
+            echo ""
+            echo "echo 'Files transferred successfully'"
+            echo "ls -la '${{ secrets.REMOTE_APP_DIR }}'"
+            echo "ls -la '${{ secrets.REMOTE_APP_DIR }}/nginx/'"
+          } | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -s'
 
       # 기존 컨테이너 정리 (선택적)
       - name: Clean up old containers
