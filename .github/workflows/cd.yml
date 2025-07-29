@@ -71,7 +71,7 @@ jobs:
           scp -o StrictHostKeyChecking=no -r \
             docker-compose.yml \
             docker-compose.prod.yml \
-            nginx/default.conf.template \
+            nginx \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${{ env.REMOTE_APP_DIR }}/
 
       - name: Start web & nginx
