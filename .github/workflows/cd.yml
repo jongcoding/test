@@ -49,7 +49,7 @@ jobs:
       - name: Add GCE host to known_hosts
         run: ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
 
-      - name: Ensure remote directory structure
+      - name: Ensure remote dirs
         run: |
           ssh -o StrictHostKeyChecking=no \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
@@ -63,40 +63,35 @@ jobs:
           ssh -o StrictHostKeyChecking=no \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "printf 'DOCKERHUB_USERNAME=%s\nDOMAIN=%s\nLETSENCRYPT_EMAIL=%s\n' \
-              \"${DOCKERHUB_USERNAME}\" \"${DOMAIN}\" \"${LETSENCRYPT_EMAIL}\" \
+              '${{ secrets.DOCKERHUB_USERNAME }}' '${{ secrets.DOMAIN }}' '${{ secrets.LETSENCRYPT_EMAIL }}' \
             > ${REMOTE_APP_DIR}/.env"
 
-      - name: Copy compose & nginx template to VM
+      - name: Copy compose & nginx template
         run: |
           scp -o StrictHostKeyChecking=no -r \
             docker-compose.yml \
             docker-compose.prod.yml \
             nginx/default.conf.template \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${{ env.REMOTE_APP_DIR }}/
 
-      - name: Start web & nginx on VM
+      - name: Start web & nginx
         run: |
           ssh -o StrictHostKeyChecking=no \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cd ${REMOTE_APP_DIR} && \
              docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d web nginx"
 
-      - name: Issue/Renew SSL certificates on VM
+      - name: Issue/Renew SSL certificates
         run: |
           ssh -o StrictHostKeyChecking=no \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cd ${REMOTE_APP_DIR} && \
-             export DOMAIN='${DOMAIN}' LETSENCRYPT_EMAIL='${LETSENCRYPT_EMAIL}' && \
              docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm certbot"
 
-      - name: Pull & restart on VM
+      - name: Pull & restart full stack
         run: |
           ssh -o StrictHostKeyChecking=no \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "set -euo pipefail && \
-             cd ${REMOTE_APP_DIR} && \
-             export DOCKERHUB_USERNAME='${DOCKERHUB_USERNAME}' \
-                    DOMAIN='${DOMAIN}' \
-                    LETSENCRYPT_EMAIL='${LETSENCRYPT_EMAIL}' && \
+            "cd ${REMOTE_APP_DIR} && \
              docker compose -f docker-compose.yml -f docker-compose.prod.yml pull && \
              docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans"
