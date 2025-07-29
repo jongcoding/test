@@ -44,31 +44,33 @@ jobs:
           ssh-private-key: ${{ secrets.GCP_SSH_KEY }}
 
       - name: Add GCE host to known_hosts
-        run: ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
 
       - name: Ensure remote dirs exist
         run: |
           ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "\
-              mkdir -p ${{ env.REMOTE_APP_DIR }} \
-                       ${{ env.REMOTE_APP_DIR }}/certbot/config \
-                       ${{ env.REMOTE_APP_DIR }}/certbot/www \
-                       ${{ env.REMOTE_APP_DIR }}/nginx"
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "mkdir -p ${{ env.REMOTE_APP_DIR }} \
+                      ${{ env.REMOTE_APP_DIR }}/certbot/config \
+                      ${{ env.REMOTE_APP_DIR }}/certbot/www \
+                      ${{ env.REMOTE_APP_DIR }}/nginx"
 
       - name: Write .env on VM
         run: |
           ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} << 'EOF'
-            cat > ${{ env.REMOTE_APP_DIR }}/.env << EOL
-            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-            DOMAIN=${{ secrets.DOMAIN }}
-            LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
-            EOL
-            EOF
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cat > ${{ env.REMOTE_APP_DIR }}/.env << 'EOF'
+DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+DOMAIN=${{ secrets.DOMAIN }}
+LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
+EOF
+            "
 
-      - name: Copy compose, nginx & certbot to VM
+      - name: Copy compose & nginx template to VM
         run: |
-          scp -r -o StrictHostKeyChecking=no \
+          scp -o StrictHostKeyChecking=no -r \
             docker-compose.yml \
             docker-compose.prod.yml \
             nginx/default.conf.template \
@@ -77,10 +79,9 @@ jobs:
       - name: Issue/Renew SSL certificates on VM
         run: |
           ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} << 'EOF'
-            cd ${{ env.REMOTE_APP_DIR }}
-            docker compose -f docker-compose.prod.yml run --rm certbot
-            EOF
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cd ${{ env.REMOTE_APP_DIR }} && \
+             docker compose -f docker-compose.prod.yml run --rm certbot"
 
       - name: Pull & restart on VM
         run: |
