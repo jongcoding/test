@@ -4,14 +4,16 @@ name: CD – Build, Push & Deploy to GCE
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*.*.*' ]
+    tags:     [ 'v*.*.*' ]      # v1.2.3 식 태그
 
+# ───────────────────────────────────────────────────────────
+# 1) 이미지 빌드 & Docker Hub 푸시
+# ───────────────────────────────────────────────────────────
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v2
@@ -28,6 +30,9 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/myflask:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/myflask:${{ github.sha }}
 
+# ───────────────────────────────────────────────────────────
+# 2) GCE VM 배포 + 인증서 발급
+# ───────────────────────────────────────────────────────────
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -38,9 +43,9 @@ jobs:
       LETSENCRYPT_EMAIL:  ${{ secrets.LETSENCRYPT_EMAIL }}
 
     steps:
-      - name: Check out code
-        uses: actions/checkout@v3
+      - uses: actions/checkout@v3
 
+      # ───── SSH 준비 ─────
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.5.4
         with:
@@ -49,13 +54,11 @@ jobs:
       - name: Add GCE host to known_hosts
         run: ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
 
+      # ───── 원격 디렉터리/파일 구성 ─────
       - name: Ensure remote directory structure
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "mkdir -p ${REMOTE_APP_DIR} \
-                      ${REMOTE_APP_DIR}/certbot/config \
-                      ${REMOTE_APP_DIR}/certbot/www \
-                      ${REMOTE_APP_DIR}/nginx"
+            "mkdir -p ${REMOTE_APP_DIR}/{certbot/www,certbot/conf,nginx}"
 
       - name: Write .env on VM
         run: |
@@ -64,31 +67,47 @@ jobs:
               '${{ secrets.DOCKERHUB_USERNAME }}' '${{ secrets.DOMAIN }}' '${{ secrets.LETSENCRYPT_EMAIL }}' \
             > ${REMOTE_APP_DIR}/.env"
 
-      - name: Copy compose files to VM
+      - name: Copy compose & nginx template to VM
         run: |
-          scp -o StrictHostKeyChecking=no \
-            docker-compose.yml docker-compose.prod.yml \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${{ env.REMOTE_APP_DIR }}/
-
-      - name: Copy nginx template to VM
-        run: |
-          scp -o StrictHostKeyChecking=no \
+          scp -o StrictHostKeyChecking=no -r \
+            docker-compose.yml \
+            docker-compose.prod.yml \
             nginx/default.conf.template \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${{ env.REMOTE_APP_DIR }}/nginx/default.conf.template
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/
 
-      - name: Start web & nginx on VM
+      # ───── Nginx(+웹) 선기동 → 80 포트 개방 ─────
+      - name: Start nginx & web (HTTP only)
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cd ${REMOTE_APP_DIR} && \
-             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d web nginx"
+             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d nginx web"
 
-      - name: Issue/Renew SSL certificates on VM
+      # ───── Runner → 도메인 80포트 접근 가능 여부 체크 (최대 60초) ─────
+      - name: Wait until port 80 is reachable
+        run: |
+          for i in {1..12}; do
+            if curl -sSf http://${{ secrets.DOMAIN }}/.well-known/robots.txt > /dev/null 2>&1 || \
+               curl -sI http://${{ secrets.DOMAIN }} | grep -qE 'HTTP/1.1 200|301|302'; then
+              echo "Port 80 OK"; break
+            fi
+            echo "Waiting for port 80 ... ($i/12)"
+            sleep 5
+            [ "$i" -eq 12 ] && { echo "Port 80 not reachable"; exit 1; }
+          done
+
+      # ───── certbot (webroot) ─────
+      - name: Issue / Renew SSL certificate
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd ${REMOTE_APP_DIR} && \
-             docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm certbot"
+            "set -e; cd ${REMOTE_APP_DIR}; \
+             docker compose run --rm certbot \
+               certonly --webroot -w /var/www/certbot \
+               --email '${{ secrets.LETSENCRYPT_EMAIL }}' \
+               -d '${{ secrets.DOMAIN }}' \
+               --agree-tos --no-eff-email --rsa-key-size 4096"
 
-      - name: Pull & restart full stack on VM
+      # ───── 전체 스택 재시작 (HTTPS 포함) ─────
+      - name: Pull images & restart full stack
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cd ${REMOTE_APP_DIR} && \
