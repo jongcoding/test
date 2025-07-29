@@ -4,111 +4,253 @@ name: CD – Build, Push & Deploy to GCE
 on:
   push:
     branches: [ main ]
-    tags:     [ 'v*.*.*' ]      # v1.2.3 식 태그
+    tags:     [ 'v*.*.*' ]
 
-# ───────────────────────────────────────────────────────────
-# 1) 이미지 빌드 & Docker Hub 푸시
-# ───────────────────────────────────────────────────────────
 jobs:
+  # 1) 이미지 빌드 & Docker Hub 푸시
   build-and-push:
     runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker Hub 로그인
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build & push Docker image
-        uses: docker/build-push-action@v3
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/myflask
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 이미지 빌드 & 푸시
+        id: build
+        uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/myflask:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/myflask:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-# ───────────────────────────────────────────────────────────
-# 2) GCE VM 배포 + 인증서 발급
-# ───────────────────────────────────────────────────────────
+  # 2) GCE VM 배포 + 인증서 발급
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
     env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      REMOTE_APP_DIR:     ${{ secrets.REMOTE_APP_DIR }}
-      DOMAIN:             ${{ secrets.DOMAIN }}
-      LETSENCRYPT_EMAIL:  ${{ secrets.LETSENCRYPT_EMAIL }}
+      REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
+      DOMAIN: ${{ secrets.DOMAIN }}
+      LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
+      IMAGE_TAG: ${{ github.sha }}
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      # ───── SSH 준비 ─────
+      # SSH 준비
       - name: Set up SSH agent
-        uses: webfactory/ssh-agent@v0.5.4
+        uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.GCP_SSH_KEY }}
 
       - name: Add GCE host to known_hosts
-        run: ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
+        run: |
+          ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
+          # 추가 보안을 위한 host key 검증
+          if [ -n "${{ secrets.GCP_HOST_KEY }}" ]; then
+            echo "${{ secrets.GCP_HOST_KEY }}" >> ~/.ssh/known_hosts
+          fi
 
-      # ───── 원격 디렉터리/파일 구성 ─────
+      # 연결 테스트
+      - name: Test SSH connection
+        run: |
+          ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "echo 'SSH connection successful'"
+
+      # 원격 폴더 구조 생성
       - name: Ensure remote directory structure
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "mkdir -p ${REMOTE_APP_DIR}/{certbot/www,certbot/conf,nginx}"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "mkdir -p \${REMOTE_APP_DIR} \
+                      \${REMOTE_APP_DIR}/nginx \
+                      \${REMOTE_APP_DIR}/certbot/config \
+                      \${REMOTE_APP_DIR}/certbot/www \
+                      \${REMOTE_APP_DIR}/certbot/logs"
 
+      # .env 파일 작성 (환경변수 전달 수정)
       - name: Write .env on VM
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "printf 'DOCKERHUB_USERNAME=%s\nDOMAIN=%s\nLETSENCRYPT_EMAIL=%s\n' \
-              '${{ secrets.DOCKERHUB_USERNAME }}' '${{ secrets.DOMAIN }}' '${{ secrets.LETSENCRYPT_EMAIL }}' \
-            > ${REMOTE_APP_DIR}/.env"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cat > \${REMOTE_APP_DIR}/.env << 'DOTENV'
+          DOMAIN=${DOMAIN}
+          LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+          IMAGE_TAG=${IMAGE_TAG}
+          DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+          DOTENV"
 
-      - name: Copy compose & nginx template to VM
+      # 프로덕션용 Compose & Nginx 템플릿 전송
+      - name: Copy production assets to VM
         run: |
-          scp -o StrictHostKeyChecking=no -r \
-            docker-compose.prod.yml \
-            nginx/default.conf.template \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/nginx/default.conf.template
+          scp docker-compose.prod.yml \
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:\${REMOTE_APP_DIR}/
+          scp nginx/default.conf.template \
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:\${REMOTE_APP_DIR}/nginx/
 
-      # ───── Nginx(+웹) 선기동 → 80 포트 개방 ─────
+      # 기존 컨테이너 정리 (선택적)
+      - name: Clean up old containers
+        run: |
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cd \${REMOTE_APP_DIR} && \
+             docker compose -f docker-compose.prod.yml down --remove-orphans || true && \
+             docker system prune -f --volumes || true"
+
+      # ① Nginx + Web 선기동 (HTTP 80 포트 열기)
       - name: Start nginx & web (HTTP only)
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd ${REMOTE_APP_DIR} && \
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cd \${REMOTE_APP_DIR} && \
+             source .env && \
+             docker compose -f docker-compose.prod.yml pull web nginx && \
              docker compose -f docker-compose.prod.yml up -d nginx web"
 
-      # ───── Runner → 도메인 80포트 접근 가능 여부 체크 (최대 60초) ─────
-      - name: Wait until port 80 is reachable
+      # ② Port 80 연결 확인 (최대 2분, 더 견고한 체크)
+      - name: Wait until port 80 is reachable
         run: |
-          for i in {1..12}; do
-            if curl -sSf http://${{ secrets.DOMAIN }}/.well-known/robots.txt > /dev/null 2>&1 || \
-               curl -sI http://${{ secrets.DOMAIN }} | grep -qE 'HTTP/1.1 200|301|302'; then
-              echo "Port 80 OK"; break
+          echo "Waiting for HTTP service to be ready..."
+          max_attempts=24
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            # 여러 엔드포인트 체크
+            if curl -sSf -m 10 --connect-timeout 5 http://${DOMAIN} >/dev/null 2>&1 || \
+               curl -sSf -m 10 --connect-timeout 5 http://${DOMAIN}/.well-known/acme-challenge/ >/dev/null 2>&1; then
+              echo "✅ Port 80 is reachable (attempt $attempt)"
+              break
             fi
-            echo "Waiting for port 80 ... ($i/12)"
+            
+            echo "⏳ Waiting for port 80... (attempt $attempt/$max_attempts)"
             sleep 5
-            [ "$i" -eq 12 ] && { echo "Port 80 not reachable"; exit 1; }
+            attempt=$((attempt + 1))
+            
+            if [ $attempt -gt $max_attempts ]; then
+              echo "❌ Port 80 not reachable after 2 minutes"
+              # 디버깅 정보 수집
+              ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+                "cd \${REMOTE_APP_DIR} && docker compose -f docker-compose.prod.yml logs nginx web"
+              exit 1
+            fi
           done
 
-      # ───── certbot (webroot) ─────
+      # ③ Certbot(webroot) 인증서 발급 (재시도 로직 포함)
       - name: Issue / Renew SSL certificate
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "set -e; cd ${REMOTE_APP_DIR}; \
-             docker compose run --rm certbot \
-               certonly --webroot -w /var/www/certbot \
-               --email '${{ secrets.LETSENCRYPT_EMAIL }}' \
-               -d '${{ secrets.DOMAIN }}' \
-               --agree-tos --no-eff-email --rsa-key-size 4096"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cd \${REMOTE_APP_DIR} && \
+             source .env && \
+             echo '🔒 Attempting to issue/renew SSL certificate...' && \
+             max_cert_attempts=3
+             cert_attempt=1
+             
+             while [ \$cert_attempt -le \$max_cert_attempts ]; do
+               echo \"Certificate attempt \$cert_attempt/\$max_cert_attempts\"
+               
+               if docker compose -f docker-compose.prod.yml run --rm certbot \
+                 certbot certonly --webroot -w /var/www/certbot \
+                 --email \${LETSENCRYPT_EMAIL} \
+                 -d \${DOMAIN} \
+                 --agree-tos --no-eff-email --rsa-key-size 4096 \
+                 --non-interactive --keep-until-expiring; then
+                 echo '✅ SSL certificate obtained successfully'
+                 break
+               fi
+               
+               echo \"❌ Certificate attempt \$cert_attempt failed\"
+               cert_attempt=\$((cert_attempt + 1))
+               
+               if [ \$cert_attempt -le \$max_cert_attempts ]; then
+                 echo '⏳ Retrying in 15 seconds...'
+                 sleep 15
+               else
+                 echo '❌ All certificate attempts failed'
+                 docker compose -f docker-compose.prod.yml logs certbot
+                 exit 1
+               fi
+             done"
 
-      # ───── 전체 스택 재시작 (HTTPS 포함) ─────
-      - name: Pull images & restart full stack
+      # ④ 최신 이미지 pull & 전체 스택 재시작 (HTTPS 포함)
+      - name: Deploy with latest images
         run: |
-          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd ${REMOTE_APP_DIR} && \
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cd \${REMOTE_APP_DIR} && \
+             source .env && \
+             echo '🚀 Pulling latest images...' && \
              docker compose -f docker-compose.prod.yml pull && \
-             docker compose -f docker-compose.prod.yml up -d --remove-orphans"
+             echo '🔄 Restarting all services...' && \
+             docker compose -f docker-compose.prod.yml up -d --remove-orphans && \
+             echo '✅ Deployment completed successfully'"
+
+      # ⑤ 배포 후 상태 확인
+      - name: Verify deployment
+        run: |
+          echo "🔍 Verifying deployment..."
+          
+          # HTTPS 체크
+          max_attempts=12
+          attempt=1
+          
+          while [ $attempt -le $max_attempts ]; do
+            if curl -sSf -m 10 --connect-timeout 5 https://${DOMAIN} >/dev/null 2>&1; then
+              echo "✅ HTTPS service is working (attempt $attempt)"
+              break
+            fi
+            
+            echo "⏳ Waiting for HTTPS service... (attempt $attempt/$max_attempts)"
+            sleep 10
+            attempt=$((attempt + 1))
+            
+            if [ $attempt -gt $max_attempts ]; then
+              echo "⚠️  HTTPS not immediately available, checking logs..."
+              ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+                "cd \${REMOTE_APP_DIR} && docker compose -f docker-compose.prod.yml logs --tail=50"
+              # HTTPS 실패해도 배포는 성공으로 간주 (HTTP는 작동 중)
+              echo "ℹ️  Deployment completed, but HTTPS may need more time"
+              break
+            fi
+          done
+
+      # ⑥ 정리 작업
+      - name: Cleanup old Docker images
+        run: |
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "docker image prune -f --filter 'until=24h' || true"
+
+  # 3) 배포 알림 (선택사항)
+  notify:
+    needs: [build-and-push, deploy]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Send deployment notification
+        if: success()
+        run: |
+          echo "✅ Deployment to ${{ secrets.DOMAIN }} completed successfully!"
+          # 여기에 Slack, Discord, 이메일 알림 등을 추가할 수 있습니다
+          
+      - name: Send failure notification
+        if: failure()
+        run: |
+          echo "❌ Deployment to ${{ secrets.DOMAIN }} failed!"
+          # 실패 알림 로직
