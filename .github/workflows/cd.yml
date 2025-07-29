@@ -1,56 +1,61 @@
-# .github/workflows/cd.yml
+# .github/workflows/cd.yml  ─── 수정본
 name: CD – Build, Push & Deploy to GCE
 
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*.*.*' ]
+    tags:     [ 'v*.*.*' ]
 
 jobs:
+# ────────────────────────────────
+# 1) Build & Push
+# ────────────────────────────────
   build-and-push:
     runs-on: ubuntu-latest
     outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
+      image-tag:    ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Docker Hub 로그인
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/myflask
           tags: |
             type=ref,event=branch
-            type=ref,event=pr
             type=sha,prefix={{branch}}-
             type=raw,value=latest,enable={{is_default_branch}}
 
-      - name: 이미지 빌드 & 푸시
+      - name: Build & Push image
         id: build
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags:   ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to:   type=gha,mode=max
 
+# ────────────────────────────────
+# 2) Deploy to GCE VM
+# ────────────────────────────────
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
     env:
-      REMOTE_APP_DIR:    ${{ secrets.REMOTE_APP_DIR }}
+      REMOTE_DIR:        ${{ secrets.REMOTE_APP_DIR }}   # 로컬(Runner) ENV
       DOMAIN:            ${{ secrets.DOMAIN }}
       LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
       IMAGE_TAG:         ${{ github.sha }}
@@ -58,127 +63,118 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
+      # SSH agent
+      - uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.GCP_SSH_KEY }}
 
-      - name: Add GCE host to known_hosts
+      - name: Add host key
         run: |
           ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
-          if [ -n "${{ secrets.GCP_HOST_KEY }}" ]; then
-            echo "${{ secrets.GCP_HOST_KEY }}" >> ~/.ssh/known_hosts
-          fi
+          [ -n "${{ secrets.GCP_HOST_KEY }}" ] && echo "${{ secrets.GCP_HOST_KEY }}" >> ~/.ssh/known_hosts
 
-      - name: Test SSH connection
+      - name: Test SSH
         run: |
-          ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "echo 'SSH connection successful'"
+          ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
 
-      - name: Ensure remote directory structure
+      # ── ① 디렉터리 준비
+      - name: Prepare directories on VM
         run: |
-          cat << 'EOF' | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} bash -s
-            REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
-            mkdir -p "$REMOTE_APP_DIR" \
-                     "$REMOTE_APP_DIR/nginx" \
-                     "$REMOTE_APP_DIR/certbot/config" \
-                     "$REMOTE_APP_DIR/certbot/www" \
-                     "$REMOTE_APP_DIR/certbot/logs"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<EOF
+          mkdir -p "${{ env.REMOTE_DIR }}"/{nginx,certbot/{config,www,logs}}
           EOF
 
-      - name: Write .env on VM
+      # ── ② .env 파일 작성
+      - name: Upload .env
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} bash -s << 'EOF'
-            REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
-            cat > "\$REMOTE_APP_DIR/.env" << 'EOENV'
-            DOMAIN=${{ secrets.DOMAIN }}
-            LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
-            IMAGE_TAG=${{ github.sha }}
-            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-            EOENV
-
-            echo ".env created at \$REMOTE_APP_DIR/.env"
-            ls -la "\$REMOTE_APP_DIR/.env"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
+          cat > "${{ env.REMOTE_DIR }}/.env" <<EOT
+          DOMAIN=${{ env.DOMAIN }}
+          LETSENCRYPT_EMAIL=${{ env.LETSENCRYPT_EMAIL }}
+          IMAGE_TAG=${{ env.IMAGE_TAG }}
+          DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+          EOT
           EOF
 
-      - name: Copy production assets to VM
+      # ── ③ Compose & Nginx 템플릿 전송
+      - name: Upload compose / nginx template
         run: |
-          {
-            echo "cat > '${{ secrets.REMOTE_APP_DIR }}/docker-compose.prod.yml' << 'COMPOSE_EOF'"
-            cat docker-compose.prod.yml
-            echo "COMPOSE_EOF"
-            echo "cat > '${{ secrets.REMOTE_APP_DIR }}/nginx/default.conf.template' << 'NGINX_EOF'"
-            cat nginx/default.conf.template
-            echo "NGINX_EOF"
-          } | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -s'
+          scp -o StrictHostKeyChecking=no docker-compose.prod.yml \
+              ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/"
+          scp -o StrictHostKeyChecking=no nginx/default.conf.template \
+              ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/nginx/"
 
-      - name: Clean up old containers
+      # ── ④ 기존 컨테이너 정리
+      - name: Clean old containers
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd \"\$REMOTE_APP_DIR\" && \
-             docker compose -f docker-compose.prod.yml down --remove-orphans || true && \
-             docker system prune -f --volumes || true"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
+            cd '${{ env.REMOTE_DIR }}' &&
+            docker compose -f docker-compose.prod.yml down --remove-orphans || true &&
+            docker system prune -f --volumes || true
+          "
 
-      - name: Start nginx & web (HTTP only)
+      # ── ⑤ Nginx & Web (HTTP) 시작
+      - name: Start nginx & web
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd \"\$REMOTE_APP_DIR\" && \
-             source .env && \
-             docker compose -f docker-compose.prod.yml pull web nginx && \
-             docker compose -f docker-compose.prod.yml up -d nginx web"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
+            cd '${{ env.REMOTE_DIR }}' &&
+            docker compose -f docker-compose.prod.yml pull web nginx &&
+            docker compose -f docker-compose.prod.yml up -d nginx web
+          "
 
-      - name: Wait until port 80 is reachable
+      # ── ⑥ HTTP 준비 대기
+      - name: Wait for HTTP
         run: |
-          echo "Waiting for HTTP service..."
           for i in {1..24}; do
-            if curl -sSf -m 10 http://${DOMAIN} >/dev/null; then
-              echo "✅ HTTP ready"
-              break
-            fi
-            sleep 5
+            curl -sSf -m 5 http://${{ env.DOMAIN }} >/dev/null && echo 'HTTP OK' && break
+            echo "…waiting ($i/24)"; sleep 5
           done
 
-      - name: Issue / Renew SSL certificate
+      # ── ⑦ Certbot (webroot, 컨테이너 사용)
+      - name: Issue / Renew SSL
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "cd \"\$REMOTE_APP_DIR\" && \
-             source .env && \
-             certbot certonly --webroot -w /var/www/certbot \
-             --email \${LETSENCRYPT_EMAIL} -d \${DOMAIN} \
-             --agree-tos --non-interactive --keep-until-expiring && \
-             docker exec nginx nginx -s reload"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
+            cd '${{ env.REMOTE_DIR }}' &&
+            docker compose run --rm certbot \
+              certonly --webroot -w /var/www/certbot \
+              --email '${{ env.LETSENCRYPT_EMAIL }}' -d '${{ env.DOMAIN }}' \
+              --agree-tos --no-eff-email --rsa-key-size 4096
+          "
 
-      - name: Deploy with latest images
+      # ── ⑧ 전체 스택(HTTPS 포함) 재시작
+      - name: Deploy latest stack
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd \"\$REMOTE_APP_DIR\" && \
-             source .env && \
-             docker compose -f docker-compose.prod.yml pull && \
-             docker compose -f docker-compose.prod.yml up -d --remove-orphans"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
+            cd '${{ env.REMOTE_DIR }}' &&
+            docker compose -f docker-compose.prod.yml pull &&
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+          "
 
-      - name: Verify deployment
+      # ── ⑨ 검증
+      - name: Verify HTTPS
         run: |
-          echo "Verifying HTTPS..."
           for i in {1..12}; do
-            if curl -sSf -m 10 https://${DOMAIN} >/dev/null; then
-              echo "✅ HTTPS ready"
-              break
-            fi
-            sleep 10
+            curl -sSf -m 5 https://${{ env.DOMAIN }} >/dev/null && echo 'HTTPS OK' && break
+            echo "…waiting HTTPS ($i/12)"; sleep 10
           done
 
-      - name: Cleanup old Docker images
+      # ── ⑩ 오래된 이미지 정리
+      - name: Prune images
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "docker image prune -f --filter 'until=24h' || true"
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "docker image prune -f --filter 'until=24h' || true"
 
+# ────────────────────────────────
+# 3) Notification
+# ────────────────────────────────
   notify:
     needs: [build-and-push, deploy]
     runs-on: ubuntu-latest
     if: always()
     steps:
-      - name: Send deployment notification
+      - name: Success notice
         if: success()
-        run: echo "✅ Deployment to ${{ secrets.DOMAIN }} completed successfully!"
-      - name: Send failure notification
+        run: echo "✅ Deployed to ${{ secrets.DOMAIN }}"
+
+      - name: Failure notice
         if: failure()
-        run: echo "❌ Deployment to ${{ secrets.DOMAIN }} failed!"
+        run: echo "❌ Deployment to ${{ secrets.DOMAIN }} failed"
