@@ -7,7 +7,6 @@ on:
     tags: [ 'v*.*.*' ]
 
 jobs:
-  # 1) 이미지 빌드 & Docker Hub 푸시
   build-and-push:
     runs-on: ubuntu-latest
     outputs:
@@ -15,16 +14,13 @@ jobs:
       image-digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
-
       - name: Docker Hub 로그인
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
@@ -35,7 +31,6 @@ jobs:
             type=ref,event=pr
             type=sha,prefix={{branch}}-
             type=raw,value=latest,enable={{is_default_branch}}
-
       - name: 이미지 빌드 & 푸시
         id: build
         uses: docker/build-push-action@v5
@@ -47,7 +42,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # 2) GCE VM 배포 + 인증서 발급
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -60,7 +54,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # SSH 준비
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -73,41 +66,36 @@ jobs:
             echo "${{ secrets.GCP_HOST_KEY }}" >> ~/.ssh/known_hosts
           fi
 
-      # 연결 테스트
       - name: Test SSH connection
         run: |
           ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "echo 'SSH connection successful'"
 
-      # 원격 폴더 구조 생성 (here-doc 방식)
       - name: Ensure remote directory structure
         run: |
           cat << 'EOF' | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "bash -s"
           REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
-          mkdir -p "\$REMOTE_APP_DIR" \
-                   "\$REMOTE_APP_DIR/nginx" \
-                   "\$REMOTE_APP_DIR/certbot/config" \
-                   "\$REMOTE_APP_DIR/certbot/www" \
-                   "\$REMOTE_APP_DIR/certbot/logs"
-          ls -ld "\$REMOTE_APP_DIR" "\$REMOTE_APP_DIR/nginx" "\$REMOTE_APP_DIR/certbot"
+          mkdir -p "$REMOTE_APP_DIR" \
+                   "$REMOTE_APP_DIR/nginx" \
+                   "$REMOTE_APP_DIR/certbot/config" \
+                   "$REMOTE_APP_DIR/certbot/www" \
+                   "$REMOTE_APP_DIR/certbot/logs"
           EOF
 
-      # .env 파일 작성 (here-doc + 파이프 방식)
       - name: Write .env on VM
         run: |
-          cat << 'DOTENV' | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "bash -s"
-          export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
-          cat > "$REMOTE_APP_DIR/.env" << 'EOENV'
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} bash -s << 'EOF'
+          REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
+          cat > "\$REMOTE_APP_DIR/.env" << 'EOENV'
           DOMAIN=${{ secrets.DOMAIN }}
           LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
           IMAGE_TAG=${{ github.sha }}
           DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
           EOENV
-          echo '.env file created successfully'
-          ls -la "$REMOTE_APP_DIR/.env"
-          DOTENV
+          echo ".env created at \$REMOTE_APP_DIR/.env"
+          ls -la "\$REMOTE_APP_DIR/.env"
+          EOF
 
-      # 프로덕션용 Compose & Nginx 템플릿 전송
       - name: Copy production assets to VM
         run: |
           {
@@ -119,7 +107,6 @@ jobs:
             echo "NGINX_EOF"
           } | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -s'
 
-      # 기존 컨테이너 정리
       - name: Clean up old containers
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
@@ -127,7 +114,6 @@ jobs:
              docker compose -f docker-compose.prod.yml down --remove-orphans || true && \
              docker system prune -f --volumes || true"
 
-      # ① Nginx + Web 선기동 (HTTP only)
       - name: Start nginx & web (HTTP only)
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
@@ -136,7 +122,6 @@ jobs:
              docker compose -f docker-compose.prod.yml pull web nginx && \
              docker compose -f docker-compose.prod.yml up -d nginx web"
 
-      # ② Port 80 연결 확인
       - name: Wait until port 80 is reachable
         run: |
           echo "Waiting for HTTP service..."
@@ -148,7 +133,6 @@ jobs:
             sleep 5
           done
 
-      # ③ SSL 인증서 발급
       - name: Issue / Renew SSL certificate
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "cd \"\$REMOTE_APP_DIR\" && \
@@ -158,7 +142,6 @@ jobs:
              --agree-tos --non-interactive --keep-until-expiring && \
              docker exec nginx nginx -s reload"
 
-      # ④ 최신 이미지 pull & 전체 재시작 (HTTPS 포함)
       - name: Deploy with latest images
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
@@ -167,7 +150,6 @@ jobs:
              docker compose -f docker-compose.prod.yml pull && \
              docker compose -f docker-compose.prod.yml up -d --remove-orphans"
 
-      # ⑤ 배포 후 상태 확인 (HTTPS)
       - name: Verify deployment
         run: |
           echo "Verifying HTTPS..."
@@ -179,13 +161,11 @@ jobs:
             sleep 10
           done
 
-      # ⑥ 정리 작업
       - name: Cleanup old Docker images
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "docker image prune -f --filter 'until=24h' || true"
 
-  # 3) 배포 알림 (선택사항)
   notify:
     needs: [build-and-push, deploy]
     runs-on: ubuntu-latest
