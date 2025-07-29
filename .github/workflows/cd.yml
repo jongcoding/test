@@ -38,41 +38,49 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
-      - name: Prepare SSH
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.5.4
+        with:
+          ssh-private-key: ${{ secrets.GCP_SSH_KEY }}
+
+      - name: Add GCE host to known_hosts
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.GCP_SSH_KEY }}" > ~/.ssh/id_rsa
-          chmod 600 ~/.ssh/id_rsa
           ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
 
       - name: Ensure remote dir exists
         run: |
-          ssh -i ~/.ssh/id_rsa ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "\
-            mkdir -p ${REMOTE_APP_DIR}"
+          ssh -o StrictHostKeyChecking=no \
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "mkdir -p ${{ env.REMOTE_APP_DIR }}"
 
       - name: Copy config & certbot to VM
         run: |
-          scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -r \
+          scp -r -o StrictHostKeyChecking=no \
             .env \
             docker-compose.yml \
             docker-compose.prod.yml \
             nginx/default.conf.template \
             certbot \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${{ env.REMOTE_APP_DIR }}/
 
       - name: Issue/Renew SSL certificates on VM
         run: |
-          ssh -i ~/.ssh/id_rsa ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "\
-            cd ${REMOTE_APP_DIR} && \
-            docker compose -f docker-compose.prod.yml run --rm certbot"
+          ssh -o StrictHostKeyChecking=no \
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} << 'EOF'
+            cd ${{ env.REMOTE_APP_DIR }}
+            docker compose -f docker-compose.prod.yml run --rm certbot
+            EOF
 
       - name: Pull & restart on VM
         run: |
-          ssh -i ~/.ssh/id_rsa ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "\
-            set -euo pipefail; \
-            cd ${REMOTE_APP_DIR} && \
+          ssh -o StrictHostKeyChecking=no \
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} << 'EOF'
+            set -euo pipefail
+            cd ${{ env.REMOTE_APP_DIR }}
             export DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME} \
                    DOMAIN=${DOMAIN} \
-                   LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL} && \
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull && \
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans"
+                   LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+            EOF
