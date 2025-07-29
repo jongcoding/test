@@ -70,17 +70,16 @@ jobs:
       - name: Copy compose & nginx template to VM
         run: |
           scp -o StrictHostKeyChecking=no -r \
-            docker-compose.yml \
             docker-compose.prod.yml \
             nginx/default.conf.template \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/nginx/default.conf.template
 
       # ───── Nginx(+웹) 선기동 → 80 포트 개방 ─────
       - name: Start nginx & web (HTTP only)
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cd ${REMOTE_APP_DIR} && \
-             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d nginx web"
+             docker compose -f docker-compose.prod.yml up -d nginx web"
 
       # ───── Runner → 도메인 80포트 접근 가능 여부 체크 (최대 60초) ─────
       - name: Wait until port 80 is reachable
@@ -111,5 +110,5 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cd ${REMOTE_APP_DIR} && \
-             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull && \
-             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans"
+             docker compose -f docker-compose.prod.yml pull && \
+             docker compose -f docker-compose.prod.yml up -d --remove-orphans"
