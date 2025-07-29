@@ -8,6 +8,8 @@ services:
     restart: unless-stopped
 
   nginx:
+    # ① 컨테이너 이름을 고정하면 renew 훅이 'nginx'라는 이름으로 접근할 수 있음
+    container_name: nginx
     image: nginx:alpine
     depends_on:
       - web
@@ -15,7 +17,8 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      # ② 호스트의 default.conf 파일을 템플릿으로 매핑
+      - ./nginx/default.conf:/etc/nginx/templates/default.conf.template:ro
       - ./certbot/config:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
     environment:

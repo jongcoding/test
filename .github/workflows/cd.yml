@@ -4,7 +4,7 @@ name: CD – Build, Push & Deploy to GCE
 on:
   push:
     branches: [ main ]
-    tags:     [ 'v*.*.*' ]
+    tags: [ 'v*.*.*' ]
 
 jobs:
   # 1) 이미지 빌드 & Docker Hub 푸시
@@ -69,7 +69,6 @@ jobs:
       - name: Add GCE host to known_hosts
         run: |
           ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
-          # 추가 보안을 위한 host key 검증
           if [ -n "${{ secrets.GCP_HOST_KEY }}" ]; then
             echo "${{ secrets.GCP_HOST_KEY }}" >> ~/.ssh/known_hosts
           fi
@@ -85,177 +84,95 @@ jobs:
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-             echo 'Creating directories in: \$REMOTE_APP_DIR' && \
-             mkdir -p \"\$REMOTE_APP_DIR\" \
-                      \"\$REMOTE_APP_DIR/nginx\" \
-                      \"\$REMOTE_APP_DIR/certbot/config\" \
-                      \"\$REMOTE_APP_DIR/certbot/www\" \
-                      \"\$REMOTE_APP_DIR/certbot/logs\" && \
-             echo 'Directory structure created successfully' && \
-             ls -la \"\$REMOTE_APP_DIR\""
+             mkdir -p \"\$REMOTE_APP_DIR\" \"\$REMOTE_APP_DIR/nginx\" \
+                      \"\$REMOTE_APP_DIR/certbot/config\" \"\$REMOTE_APP_DIR/certbot/www\" \
+                      \"\$REMOTE_APP_DIR/certbot/logs\""
 
-      # .env 파일 작성 (환경변수 전달 수정)
+      # .env 파일 작성 (here-doc + 파이프 방식)
       - name: Write .env on VM
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-             cat > \"\$REMOTE_APP_DIR/.env\" << 'DOTENV'
+          cat << 'DOTENV' | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "bash -s"
+          export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
+          cat > "$REMOTE_APP_DIR/.env" << 'EOENV'
           DOMAIN=${{ secrets.DOMAIN }}
           LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
           IMAGE_TAG=${{ github.sha }}
           DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+          EOENV
+          echo '.env file created successfully'
+          ls -la "$REMOTE_APP_DIR/.env"
           DOTENV
-          echo '.env file created successfully' && \
-          cat \"\$REMOTE_APP_DIR/.env\""
 
       # 프로덕션용 Compose & Nginx 템플릿 전송
       - name: Copy production assets to VM
         run: |
-          # 효율적인 한 번의 SSH 세션으로 모든 파일 전송
           {
-            echo "# Transferring docker-compose.prod.yml"
             echo "cat > '${{ secrets.REMOTE_APP_DIR }}/docker-compose.prod.yml' << 'COMPOSE_EOF'"
             cat docker-compose.prod.yml
             echo "COMPOSE_EOF"
-            echo ""
-            echo "# Transferring nginx config template"  
             echo "cat > '${{ secrets.REMOTE_APP_DIR }}/nginx/default.conf.template' << 'NGINX_EOF'"
             cat nginx/default.conf.template
             echo "NGINX_EOF"
-            echo ""
-            echo "echo 'Files transferred successfully'"
-            echo "ls -la '${{ secrets.REMOTE_APP_DIR }}'"
-            echo "ls -la '${{ secrets.REMOTE_APP_DIR }}/nginx/'"
           } | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -s'
 
-      # 기존 컨테이너 정리 (선택적)
+      # 기존 컨테이너 정리
       - name: Clean up old containers
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-             cd \"\$REMOTE_APP_DIR\" && \
+            "cd \"\$REMOTE_APP_DIR\" && \
              docker compose -f docker-compose.prod.yml down --remove-orphans || true && \
              docker system prune -f --volumes || true"
 
-      # ① Nginx + Web 선기동 (HTTP 80 포트 열기)
+      # ① Nginx + Web 선기동 (HTTP only)
       - name: Start nginx & web (HTTP only)
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-             cd \"\$REMOTE_APP_DIR\" && \
+            "cd \"\$REMOTE_APP_DIR\" && \
              source .env && \
              docker compose -f docker-compose.prod.yml pull web nginx && \
              docker compose -f docker-compose.prod.yml up -d nginx web"
 
-      # ② Port 80 연결 확인 (최대 2분, 더 견고한 체크)
+      # ② Port 80 연결 확인
       - name: Wait until port 80 is reachable
         run: |
-          echo "Waiting for HTTP service to be ready..."
-          max_attempts=24
-          attempt=1
-          
-          while [ $attempt -le $max_attempts ]; do
-            # 여러 엔드포인트 체크
-            if curl -sSf -m 10 --connect-timeout 5 http://${DOMAIN} >/dev/null 2>&1 || \
-               curl -sSf -m 10 --connect-timeout 5 http://${DOMAIN}/.well-known/acme-challenge/ >/dev/null 2>&1; then
-              echo "✅ Port 80 is reachable (attempt $attempt)"
+          echo "Waiting for HTTP service..."
+          for i in {1..24}; do
+            if curl -sSf -m 10 http://${DOMAIN} >/dev/null; then
+              echo "✅ HTTP ready"
               break
             fi
-            
-            echo "⏳ Waiting for port 80... (attempt $attempt/$max_attempts)"
             sleep 5
-            attempt=$((attempt + 1))
-            
-            if [ $attempt -gt $max_attempts ]; then
-              echo "❌ Port 80 not reachable after 2 minutes"
-              # 디버깅 정보 수집
-              ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-                "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-                 cd \"\$REMOTE_APP_DIR\" && \
-                 docker compose -f docker-compose.prod.yml logs nginx web"
-              exit 1
-            fi
           done
 
-      # ③ Certbot(webroot) 인증서 발급 (재시도 로직 포함)
+      # ③ SSL 인증서 발급
       - name: Issue / Renew SSL certificate
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-             cd \"\$REMOTE_APP_DIR\" && \
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "cd \"\$REMOTE_APP_DIR\" && \
              source .env && \
-             echo '🔒 Attempting to issue/renew SSL certificate...' && \
-             max_cert_attempts=3
-             cert_attempt=1
-             
-             while [ \$cert_attempt -le \$max_cert_attempts ]; do
-               echo \"Certificate attempt \$cert_attempt/\$max_cert_attempts\"
-               
-               if docker compose -f docker-compose.prod.yml run --rm certbot \
-                 certbot certonly --webroot -w /var/www/certbot \
-                 --email \${LETSENCRYPT_EMAIL} \
-                 -d \${DOMAIN} \
-                 --agree-tos --no-eff-email --rsa-key-size 4096 \
-                 --non-interactive --keep-until-expiring; then
-                 echo '✅ SSL certificate obtained successfully'
-                 break
-               fi
-               
-               echo \"❌ Certificate attempt \$cert_attempt failed\"
-               cert_attempt=\$((cert_attempt + 1))
-               
-               if [ \$cert_attempt -le \$max_cert_attempts ]; then
-                 echo '⏳ Retrying in 15 seconds...'
-                 sleep 15
-               else
-                 echo '❌ All certificate attempts failed'
-                 docker compose -f docker-compose.prod.yml logs certbot
-                 exit 1
-               fi
-             done"
+             certbot certonly --webroot -w /var/www/certbot \
+             --email \${LETSENCRYPT_EMAIL} -d \${DOMAIN} \
+             --agree-tos --non-interactive --keep-until-expiring && \
+             docker exec nginx nginx -s reload"
 
-      # ④ 최신 이미지 pull & 전체 스택 재시작 (HTTPS 포함)
+      # ④ 최신 이미지 pull & 전체 재시작 (HTTPS 포함)
       - name: Deploy with latest images
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-             cd \"\$REMOTE_APP_DIR\" && \
+            "cd \"\$REMOTE_APP_DIR\" && \
              source .env && \
-             echo '🚀 Pulling latest images...' && \
              docker compose -f docker-compose.prod.yml pull && \
-             echo '🔄 Restarting all services...' && \
-             docker compose -f docker-compose.prod.yml up -d --remove-orphans && \
-             echo '✅ Deployment completed successfully'"
+             docker compose -f docker-compose.prod.yml up -d --remove-orphans"
 
-      # ⑤ 배포 후 상태 확인
+      # ⑤ 배포 후 상태 확인 (HTTPS)
       - name: Verify deployment
         run: |
-          echo "🔍 Verifying deployment..."
-          
-          # HTTPS 체크
-          max_attempts=12
-          attempt=1
-          
-          while [ $attempt -le $max_attempts ]; do
-            if curl -sSf -m 10 --connect-timeout 5 https://${DOMAIN} >/dev/null 2>&1; then
-              echo "✅ HTTPS service is working (attempt $attempt)"
+          echo "Verifying HTTPS..."
+          for i in {1..12}; do
+            if curl -sSf -m 10 https://${DOMAIN} >/dev/null; then
+              echo "✅ HTTPS ready"
               break
             fi
-            
-            echo "⏳ Waiting for HTTPS service... (attempt $attempt/$max_attempts)"
             sleep 10
-            attempt=$((attempt + 1))
-            
-            if [ $attempt -gt $max_attempts ]; then
-              echo "⚠️  HTTPS not immediately available, checking logs..."
-              ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-                "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-                 cd \"\$REMOTE_APP_DIR\" && \
-                 docker compose -f docker-compose.prod.yml logs --tail=50"
-              # HTTPS 실패해도 배포는 성공으로 간주 (HTTP는 작동 중)
-              echo "ℹ️  Deployment completed, but HTTPS may need more time"
-              break
-            fi
           done
 
       # ⑥ 정리 작업
@@ -272,12 +189,7 @@ jobs:
     steps:
       - name: Send deployment notification
         if: success()
-        run: |
-          echo "✅ Deployment to ${{ secrets.DOMAIN }} completed successfully!"
-          # 여기에 Slack, Discord, 이메일 알림 등을 추가할 수 있습니다
-          
+        run: echo "✅ Deployment to ${{ secrets.DOMAIN }} completed successfully!"
       - name: Send failure notification
         if: failure()
-        run: |
-          echo "❌ Deployment to ${{ secrets.DOMAIN }} failed!"
-          # 실패 알림 로직
+        run: echo "❌ Deployment to ${{ secrets.DOMAIN }} failed!"
