@@ -62,10 +62,10 @@ jobs:
           ssh -o StrictHostKeyChecking=no \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cat > ${{ env.REMOTE_APP_DIR }}/.env << 'EOF'
-DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-DOMAIN=${{ secrets.DOMAIN }}
-LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
-EOF
+            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+            DOMAIN=${{ secrets.DOMAIN }}
+            LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
+            EOF
             "
 
       - name: Copy compose & nginx template to VM
