@@ -50,10 +50,10 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     env:
-      REMOTE_APP_DIR:   ${{ secrets.REMOTE_APP_DIR }}
-      DOMAIN:           ${{ secrets.DOMAIN }}
-      LETSENCRYPT_EMAIL:${{ secrets.LETSENCRYPT_EMAIL }}
-      IMAGE_TAG:        ${{ github.sha }}
+      REMOTE_APP_DIR:    ${{ secrets.REMOTE_APP_DIR }}
+      DOMAIN:            ${{ secrets.DOMAIN }}
+      LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
+      IMAGE_TAG:         ${{ github.sha }}
 
     steps:
       - uses: actions/checkout@v4
