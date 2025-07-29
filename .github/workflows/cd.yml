@@ -32,6 +32,8 @@ jobs:
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       REMOTE_APP_DIR:     ${{ secrets.REMOTE_APP_DIR }}
+      DOMAIN:             ${{ secrets.DOMAIN }}
+      LETSENCRYPT_EMAIL:  ${{ secrets.LETSENCRYPT_EMAIL }}
 
     steps:
       - uses: actions/checkout@v3
@@ -48,17 +50,29 @@ jobs:
           ssh -i ~/.ssh/id_rsa ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "\
             mkdir -p ${REMOTE_APP_DIR}"
 
-      - name: Copy files to VM (scp)
+      - name: Copy config & certbot to VM
         run: |
           scp -i ~/.ssh/id_rsa -o StrictHostKeyChecking=no -r \
-            docker-compose.yml docker-compose.prod.yml nginx \
+            .env \
+            docker-compose.yml \
+            docker-compose.prod.yml \
+            nginx/default.conf.template \
+            certbot \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/
+
+      - name: Issue/Renew SSL certificates on VM
+        run: |
+          ssh -i ~/.ssh/id_rsa ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "\
+            cd ${REMOTE_APP_DIR} && \
+            docker compose -f docker-compose.prod.yml run --rm certbot"
 
       - name: Pull & restart on VM
         run: |
           ssh -i ~/.ssh/id_rsa ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "\
             set -euo pipefail; \
             cd ${REMOTE_APP_DIR} && \
-            export DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME} && \
+            export DOCKERHUB_USERNAME=${DOCKERHUB_USERNAME} \
+                   DOMAIN=${DOMAIN} \
+                   LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL} && \
             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull && \
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans"
