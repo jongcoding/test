@@ -179,3 +179,5 @@ jobs:
       - name: Failure notice
         if: failure()
         run: echo "❌ Deployment to ${{ secrets.DOMAIN }} failed"
+
+        
