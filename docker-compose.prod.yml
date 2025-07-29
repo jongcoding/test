@@ -8,7 +8,6 @@ services:
       - FLASK_ENV=production
     expose:
       - "5000"
-    ports: []               # 외부 노출은 nginx가 담당
     restart: unless-stopped
 
   nginx:
@@ -17,6 +16,42 @@ services:
       - web
     ports:
       - "80:80"
+      - "443:443"
     volumes:
-      - ./nginx:/etc/nginx/conf.d:ro
+      - ./nginx/default.conf.template:/etc/nginx/conf.d/default.conf.template:ro
+      - ./certbot/config:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    environment:
+      - DOMAIN=${DOMAIN}
+      - DOMAIN_WWW=${DOMAIN_WWW}
+    entrypoint: >
+      sh -c "envsubst '\$\$DOMAIN \$\$DOMAIN_WWW' < /etc/nginx/conf.d/default.conf.template \
+            > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
+    restart: unless-stopped
+
+  certbot:
+    image: certbot/certbot
+    command: >
+      certonly --standalone
+        --non-interactive
+        --agree-tos
+        --email ${LETSENCRYPT_EMAIL}
+        -d ${DOMAIN} -d ${DOMAIN_WWW}
+    volumes:
+      - ./certbot/config:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    restart: "no"
+
+  certbot-renew:
+    # 매 N 시간마다 자동 갱신 + nginx reload
+    image: certbot/certbot
+    volumes:
+      - ./certbot/config:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint: >
+      sh -c "while true; do
+             certbot renew --quiet --deploy-hook 'docker exec nginx nginx -s reload';
+             sleep 12h;
+           done"
     restart: unless-stopped
