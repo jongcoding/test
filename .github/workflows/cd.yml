@@ -2,12 +2,18 @@ name: CD – Build, Push & Deploy to GCE
 
 on:
   push:
-    branches: [ main ]
-    tags: [ 'v*.*.*' ]
+    branches:
+      - main          # main 브랜치 푸시
+    tags:
+      - 'v*.*.*'      # 버전 태그(v1.2.3 등) 푸시
 
 jobs:
+  # ────────────────────────────────
+  # 1) Build 이미지 & Docker Hub 푸시
+  # ────────────────────────────────
   build-and-push:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v3
 
@@ -26,9 +32,13 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/myflask:latest
             ${{ secrets.DOCKERHUB_USERNAME }}/myflask:${{ github.sha }}
 
+  # ────────────────────────────────
+  # 2) 원격 GCE VM에 배포
+  # ────────────────────────────────
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
+
     env:
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       REMOTE_APP_DIR:     ${{ secrets.REMOTE_APP_DIR }}
@@ -38,6 +48,9 @@ jobs:
     steps:
       - uses: actions/checkout@v3
 
+      # ──────────────────────────────
+      # SSH 초기화
+      # ──────────────────────────────
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.5.4
         with:
@@ -48,26 +61,33 @@ jobs:
           mkdir -p ~/.ssh
           ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
 
+      # ──────────────────────────────
+      # 원격 디렉터리 준비
+      # ──────────────────────────────
       - name: Ensure remote dirs exist
         run: |
-          ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "mkdir -p ${{ env.REMOTE_APP_DIR }} \
-                      ${{ env.REMOTE_APP_DIR }}/certbot/config \
-                      ${{ env.REMOTE_APP_DIR }}/certbot/www \
-                      ${{ env.REMOTE_APP_DIR }}/nginx"
+                     ${{ env.REMOTE_APP_DIR }}/certbot/config \
+                     ${{ env.REMOTE_APP_DIR }}/certbot/www \
+                     ${{ env.REMOTE_APP_DIR }}/nginx"
 
+      # ──────────────────────────────
+      # .env 파일 작성 (들여쓰기 0칸)
+      # ──────────────────────────────
       - name: Write .env on VM
         run: |
-          ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cat > ${{ env.REMOTE_APP_DIR }}/.env << 'EOF'
-            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-            DOMAIN=${{ secrets.DOMAIN }}
-            LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
-            EOF
-            "
+          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'SSH'
+cat > ${{ env.REMOTE_APP_DIR }}/.env <<'EOT'
+DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+DOMAIN=${{ secrets.DOMAIN }}
+LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
+EOT
+SSH
 
+      # ──────────────────────────────
+      # compose & nginx 템플릿 전송
+      # ──────────────────────────────
       - name: Copy compose & nginx template to VM
         run: |
           scp -o StrictHostKeyChecking=no -r \
@@ -76,22 +96,28 @@ jobs:
             nginx/default.conf.template \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${{ env.REMOTE_APP_DIR }}/
 
+      # ──────────────────────────────
+      # SSL 인증서 발급/갱신
+      # ──────────────────────────────
       - name: Issue/Renew SSL certificates on VM
         run: |
-          ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cd ${{ env.REMOTE_APP_DIR }} && \
              docker compose -f docker-compose.prod.yml run --rm certbot"
 
+      # ──────────────────────────────
+      # 최신 이미지 가져와 서비스 재시작
+      # ──────────────────────────────
       - name: Pull & restart on VM
         run: |
-          ssh -o StrictHostKeyChecking=no \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} << 'EOF'
-            set -euo pipefail
-            cd ${{ env.REMOTE_APP_DIR }}
-            export DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }} \
-                   DOMAIN=${{ secrets.DOMAIN }} \
-                   LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
-            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
-            EOF
+          ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'SSH'
+set -euo pipefail
+cd ${{ env.REMOTE_APP_DIR }}
+
+export DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+export DOMAIN=${{ secrets.DOMAIN }}
+export LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
+
+docker compose -f docker-compose.yml -f docker-compose.prod.yml pull
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans
+SSH
