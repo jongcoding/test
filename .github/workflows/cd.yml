@@ -72,8 +72,6 @@ jobs:
             docker-compose.yml \
             docker-compose.prod.yml \
             nginx/default.conf.template \
-            certbot/config \
-            certbot/www \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${{ env.REMOTE_APP_DIR }}/
 
       - name: Issue/Renew SSL certificates on VM
