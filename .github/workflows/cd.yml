@@ -79,14 +79,18 @@ jobs:
           ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "echo 'SSH connection successful'"
 
-      # 원격 폴더 구조 생성
+      # 원격 폴더 구조 생성 (here-doc 방식)
       - name: Ensure remote directory structure
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
-             mkdir -p \"\$REMOTE_APP_DIR\" \"\$REMOTE_APP_DIR/nginx\" \
-                      \"\$REMOTE_APP_DIR/certbot/config\" \"\$REMOTE_APP_DIR/certbot/www\" \
-                      \"\$REMOTE_APP_DIR/certbot/logs\""
+          cat << 'EOF' | ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "bash -s"
+          REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
+          mkdir -p "\$REMOTE_APP_DIR" \
+                   "\$REMOTE_APP_DIR/nginx" \
+                   "\$REMOTE_APP_DIR/certbot/config" \
+                   "\$REMOTE_APP_DIR/certbot/www" \
+                   "\$REMOTE_APP_DIR/certbot/logs"
+          ls -ld "\$REMOTE_APP_DIR" "\$REMOTE_APP_DIR/nginx" "\$REMOTE_APP_DIR/certbot"
+          EOF
 
       # .env 파일 작성 (here-doc + 파이프 방식)
       - name: Write .env on VM
