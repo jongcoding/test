@@ -74,13 +74,20 @@ jobs:
             nginx/default.conf.template \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:${REMOTE_APP_DIR}/
 
+      - name: Start web & nginx on VM
+        run: |
+          ssh -o StrictHostKeyChecking=no \
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+            "cd ${REMOTE_APP_DIR} && \
+             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d web nginx"
+
       - name: Issue/Renew SSL certificates on VM
         run: |
           ssh -o StrictHostKeyChecking=no \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
             "cd ${REMOTE_APP_DIR} && \
              export DOMAIN='${DOMAIN}' LETSENCRYPT_EMAIL='${LETSENCRYPT_EMAIL}' && \
-             docker compose -f docker-compose.prod.yml run --rm certbot"
+             docker compose -f docker-compose.yml -f docker-compose.prod.yml run --rm certbot"
 
       - name: Pull & restart on VM
         run: |
