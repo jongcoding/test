@@ -84,36 +84,45 @@ jobs:
       - name: Ensure remote directory structure
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "mkdir -p \${REMOTE_APP_DIR} \
-                      \${REMOTE_APP_DIR}/nginx \
-                      \${REMOTE_APP_DIR}/certbot/config \
-                      \${REMOTE_APP_DIR}/certbot/www \
-                      \${REMOTE_APP_DIR}/certbot/logs"
+            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
+             echo 'Creating directories in: \$REMOTE_APP_DIR' && \
+             mkdir -p \"\$REMOTE_APP_DIR\" \
+                      \"\$REMOTE_APP_DIR/nginx\" \
+                      \"\$REMOTE_APP_DIR/certbot/config\" \
+                      \"\$REMOTE_APP_DIR/certbot/www\" \
+                      \"\$REMOTE_APP_DIR/certbot/logs\" && \
+             echo 'Directory structure created successfully' && \
+             ls -la \"\$REMOTE_APP_DIR\""
 
       # .env 파일 작성 (환경변수 전달 수정)
       - name: Write .env on VM
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cat > \${REMOTE_APP_DIR}/.env << 'DOTENV'
-          DOMAIN=${DOMAIN}
-          LETSENCRYPT_EMAIL=${LETSENCRYPT_EMAIL}
-          IMAGE_TAG=${IMAGE_TAG}
+            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
+             cat > \"\$REMOTE_APP_DIR/.env\" << 'DOTENV'
+          DOMAIN=${{ secrets.DOMAIN }}
+          LETSENCRYPT_EMAIL=${{ secrets.LETSENCRYPT_EMAIL }}
+          IMAGE_TAG=${{ github.sha }}
           DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-          DOTENV"
+          DOTENV
+          echo '.env file created successfully' && \
+          cat \"\$REMOTE_APP_DIR/.env\""
 
       # 프로덕션용 Compose & Nginx 템플릿 전송
       - name: Copy production assets to VM
         run: |
+          export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}'
           scp docker-compose.prod.yml \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:\${REMOTE_APP_DIR}/
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"$REMOTE_APP_DIR/"
           scp nginx/default.conf.template \
-            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:\${REMOTE_APP_DIR}/nginx/
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"$REMOTE_APP_DIR/nginx/"
 
       # 기존 컨테이너 정리 (선택적)
       - name: Clean up old containers
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd \${REMOTE_APP_DIR} && \
+            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
+             cd \"\$REMOTE_APP_DIR\" && \
              docker compose -f docker-compose.prod.yml down --remove-orphans || true && \
              docker system prune -f --volumes || true"
 
@@ -121,7 +130,8 @@ jobs:
       - name: Start nginx & web (HTTP only)
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd \${REMOTE_APP_DIR} && \
+            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
+             cd \"\$REMOTE_APP_DIR\" && \
              source .env && \
              docker compose -f docker-compose.prod.yml pull web nginx && \
              docker compose -f docker-compose.prod.yml up -d nginx web"
@@ -149,7 +159,9 @@ jobs:
               echo "❌ Port 80 not reachable after 2 minutes"
               # 디버깅 정보 수집
               ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-                "cd \${REMOTE_APP_DIR} && docker compose -f docker-compose.prod.yml logs nginx web"
+                "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
+                 cd \"\$REMOTE_APP_DIR\" && \
+                 docker compose -f docker-compose.prod.yml logs nginx web"
               exit 1
             fi
           done
@@ -158,7 +170,8 @@ jobs:
       - name: Issue / Renew SSL certificate
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd \${REMOTE_APP_DIR} && \
+            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
+             cd \"\$REMOTE_APP_DIR\" && \
              source .env && \
              echo '🔒 Attempting to issue/renew SSL certificate...' && \
              max_cert_attempts=3
@@ -194,7 +207,8 @@ jobs:
       - name: Deploy with latest images
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-            "cd \${REMOTE_APP_DIR} && \
+            "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
+             cd \"\$REMOTE_APP_DIR\" && \
              source .env && \
              echo '🚀 Pulling latest images...' && \
              docker compose -f docker-compose.prod.yml pull && \
@@ -224,7 +238,9 @@ jobs:
             if [ $attempt -gt $max_attempts ]; then
               echo "⚠️  HTTPS not immediately available, checking logs..."
               ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
-                "cd \${REMOTE_APP_DIR} && docker compose -f docker-compose.prod.yml logs --tail=50"
+                "export REMOTE_APP_DIR='${{ secrets.REMOTE_APP_DIR }}' && \
+                 cd \"\$REMOTE_APP_DIR\" && \
+                 docker compose -f docker-compose.prod.yml logs --tail=50"
               # HTTPS 실패해도 배포는 성공으로 간주 (HTTP는 작동 중)
               echo "ℹ️  Deployment completed, but HTTPS may need more time"
               break
