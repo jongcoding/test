@@ -3,7 +3,6 @@ version: '3.8'
 services:
   web:
     image: ${DOCKERHUB_USERNAME}/myflask:latest
-    build: null
     environment:
       - FLASK_ENV=production
     expose:
@@ -23,35 +22,33 @@ services:
       - ./certbot/www:/var/www/certbot:ro
     environment:
       - DOMAIN=${DOMAIN}
-      - DOMAIN_WWW=${DOMAIN_WWW}
     entrypoint: >
-      sh -c "envsubst '\$\$DOMAIN \$\$DOMAIN_WWW' < /etc/nginx/conf.d/default.conf.template \
+      sh -c "envsubst '$$DOMAIN' < /etc/nginx/conf.d/default.conf.template \
             > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
     restart: unless-stopped
 
   certbot:
     image: certbot/certbot
     command: >
-      certonly --standalone
-        --non-interactive
-        --agree-tos
-        --email ${LETSENCRYPT_EMAIL}
-        -d ${DOMAIN} -d ${DOMAIN_WWW}
+      certonly --standalone \
+        --non-interactive \
+        --agree-tos \
+        --email ${LETSENCRYPT_EMAIL} \
+        -d ${DOMAIN}
     volumes:
       - ./certbot/config:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
     restart: "no"
 
   certbot-renew:
-    # 매 N 시간마다 자동 갱신 + nginx reload
     image: certbot/certbot
     volumes:
       - ./certbot/config:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
       - /var/run/docker.sock:/var/run/docker.sock
     entrypoint: >
-      sh -c "while true; do
-             certbot renew --quiet --deploy-hook 'docker exec nginx nginx -s reload';
-             sleep 12h;
+      sh -c "while true; do \
+             certbot renew --quiet --deploy-hook 'docker exec nginx nginx -s reload'; \
+             sleep 12h; \
            done"
     restart: unless-stopped
