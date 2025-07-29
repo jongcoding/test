@@ -18,7 +18,7 @@ services:
       - "443:443"
     volumes:
       # ② 호스트의 default.conf 파일을 템플릿으로 매핑
-      - - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./certbot/config:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
     environment:
