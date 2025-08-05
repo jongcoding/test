@@ -135,13 +135,22 @@ jobs:
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
             cd '${{ env.REMOTE_DIR }}' &&
             docker compose -f docker-compose.prod.yml run --rm --entrypoint \"\" certbot \
-              sh -exc '
+              sh -ec '
+                set -e
                 OPTIONS=/etc/letsencrypt/options-ssl-nginx.conf
                 DHPARAM=/etc/letsencrypt/ssl-dhparams.pem
+
+                # 1) options‑ssl‑nginx.conf 확보
                 if [ ! -f \"$OPTIONS\" ]; then
-                  SRC=$(find /usr -path \"*options-ssl-nginx.conf\" | head -n1)
+                  SRC=\$(find /usr -type f -name options-ssl-nginx.conf | head -n1)
+                  if [ -z \"$SRC\" ]; then
+                    echo \"[ERROR] options-ssl-nginx.conf not found\" >&2
+                    exit 1
+                  fi
                   cp \"$SRC\" \"$OPTIONS\"
                 fi
+
+                # 2) ssl‑dhparams.pem (없으면 생성)
                 if [ ! -f \"$DHPARAM\" ]; then
                   openssl dhparam -out \"$DHPARAM\" 4096
                 fi
@@ -165,7 +174,7 @@ jobs:
             \"
           "
 
-      # ⑨ 최신 이미지 pull & 전체 스택 ---------------------------------------
+      # ⑨ 최신 이미지 pull & 스택 -------------------------------------------
       - name: Deploy latest stack
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
