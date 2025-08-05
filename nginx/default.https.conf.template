@@ -1,21 +1,17 @@
-# 1) HTTP: ACME 챌린지 응답 및 HTTPS로 리다이렉트
+# 1) HTTP → HTTPS 리다이렉트 + ACME
 server {
     listen 80;
     server_name ${DOMAIN};
 
-    # Let's Encrypt Webroot 인증 파일 제공
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/certbot;
         allow all;
     }
 
-    # 나머지 요청은 HTTPS로 리다이렉트
-    location / {
-        return 301 https://\$host\$request_uri;
-    }
+    location / { return 301 https://$host$request_uri; }
 }
 
-# 2) HTTPS: 실제 트래픽 처리
+# 2) HTTPS 서비스
 server {
     listen 443 ssl http2;
     server_name ${DOMAIN};
@@ -25,14 +21,13 @@ server {
     include             /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
 
-    # HSTS 헤더 추가 (선택)
     # add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
     location / {
-        proxy_pass         http://web:5000;
-        proxy_set_header   Host              \$host;
-        proxy_set_header   X-Real-IP         \$remote_addr;
-        proxy_set_header   X-Forwarded-For   \$proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto \$scheme;
+        proxy_pass http://web:5000;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 }
