@@ -7,7 +7,7 @@ on:
     tags:     [ 'v*.*.*' ]
 
 jobs:
-  # 1) Build & Push
+  # 1) Build & Push ───────────────────────────────────────────
   build-and-push:
     runs-on: ubuntu-latest
     outputs:
@@ -44,7 +44,7 @@ jobs:
           cache-from: type=gha
           cache-to:   type=gha,mode=max
 
-  # 2) Deploy to GCE VM
+  # 2) Deploy to GCE VM ───────────────────────────────────────
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -57,6 +57,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ────── SSH 준비 ──────────────────────────────────────
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -70,39 +71,31 @@ jobs:
           fi
 
       - name: Test SSH
-        run: |
-          ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
+        run: ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
 
-      # ① 디렉터리 준비
-      - name: Prepare directories on VM
+      # ────── ① 디렉터리 & .env 생성 ────────────────────────
+      - name: Prepare app directory & .env
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<EOF
-          mkdir -p "${{ env.REMOTE_DIR }}"/{nginx,certbot/{config,www,logs}}
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
+            mkdir -p "${{ env.REMOTE_DIR }}"/{nginx,certbot/{config,www,logs}}
+            cat > "${{ env.REMOTE_DIR }}/.env" <<EOT
+            DOMAIN=${{ env.DOMAIN }}
+            LETSENCRYPT_EMAIL=${{ env.LETSENCRYPT_EMAIL }}
+            IMAGE_TAG=${{ env.IMAGE_TAG }}
+            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+            EOT
           EOF
 
-      # ② .env 파일 작성
-      - name: Upload .env
+      # ────── ② HTTP‑only 템플릿 & Compose 업로드 ─────────────
+      - name: Upload HTTP‑only Nginx template + compose
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<EOF
-          cat > "${{ env.REMOTE_DIR }}/.env" <<EOT
-          DOMAIN=${{ env.DOMAIN }}
-          LETSENCRYPT_EMAIL=${{ env.LETSENCRYPT_EMAIL }}
-          IMAGE_TAG=${{ env.IMAGE_TAG }}
-          DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
-          EOT
-          EOF
-
-      # ③ Compose & simple Nginx config 전송
-      - name: Upload compose & simple Nginx config
-        run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "rm -rf '${{ env.REMOTE_DIR }}/nginx/default.conf'"
+          scp -o StrictHostKeyChecking=no nginx/default.http.conf.template \
+              ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/nginx/default.conf.template"
           scp -o StrictHostKeyChecking=no docker-compose.prod.yml \
               ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/"
-          scp -o StrictHostKeyChecking=no nginx/default.conf \
-              ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/nginx/default.conf"
 
-      # ④ simple config로 Nginx & Web 시작
-      - name: Start simple nginx & web
+      # ────── ③ 스택 기동(80) ────────────────────────────────
+      - name: Start HTTP‑only stack
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
             cd '${{ env.REMOTE_DIR }}' &&
@@ -110,15 +103,15 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d nginx web
           "
 
-      # ⑤ HTTP 준비 대기
+      # ────── ④ HTTP 응답 대기 ───────────────────────────────
       - name: Wait for HTTP
         run: |
           for i in {1..24}; do
             curl -sSf -m 5 http://${{ env.DOMAIN }} >/dev/null && echo 'HTTP OK' && break
-            sleep 5
+            echo "...waiting HTTP ($i/24)"; sleep 5
           done
 
-      # ⑥ Certbot (webroot) 인증서 발급/갱신
+      # ────── ⑤ 인증서 발급/갱신 ─────────────────────────────
       - name: Issue / Renew SSL
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
@@ -129,23 +122,24 @@ jobs:
               --agree-tos --no-eff-email --rsa-key-size 4096
           "
 
-      # ⑦ full template 전송
-      - name: Upload full Nginx template
+      # ────── ⑥ HTTPS 템플릿 업로드 ──────────────────────────
+      - name: Upload HTTPS Nginx template
         run: |
-          scp -o StrictHostKeyChecking=no nginx/default.conf.template \
+          scp -o StrictHostKeyChecking=no nginx/default.https.conf.template \
               ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/nginx/default.conf.template"
 
-      # ⑧ 치환 및 nginx reload
-      - name: Apply full config & reload nginx
+      # ────── ⑦ 컨테이너 내부에서 conf 재생성 & reload ───────
+      - name: Apply HTTPS config & reload nginx
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
             cd '${{ env.REMOTE_DIR }}' &&
-            envsubst '\$DOMAIN' < nginx/default.conf.template \
-              > nginx/default.conf &&
-            docker compose exec nginx nginx -s reload
+            docker compose exec nginx sh -c \"
+              envsubst '\\$DOMAIN' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf &&
+              nginx -s reload
+            \"
           "
 
-      # ⑨ 전체 스택(HTTPS 포함) 재시작 (필요시)
+      # ────── ⑧ (선택) 전체 스택 최신화 ─────────────────────
       - name: Deploy latest stack
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
@@ -154,20 +148,20 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
           "
 
-      # ⑩ 검증
+      # ────── ⑨ HTTPS 검증 ───────────────────────────────────
       - name: Verify HTTPS
         run: |
           for i in {1..12}; do
             curl -sSf -m 5 https://${{ env.DOMAIN }} >/dev/null && echo 'HTTPS OK' && break
-            echo "…waiting HTTPS ($i/12)"; sleep 10
+            echo "...waiting HTTPS ($i/12)"; sleep 10
           done
 
-      # ⑪ 오래된 이미지 정리
+      # ────── ⑩ 오래된 이미지 정리 ───────────────────────────
       - name: Prune images
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "docker image prune -f --filter 'until=24h' || true"
 
-  # 3) Notification
+  # 3) Slack / 메일 등 알림(예시) ─────────────────────────────
   notify:
     needs: [build-and-push, deploy]
     runs-on: ubuntu-latest
@@ -179,5 +173,3 @@ jobs:
       - name: Failure notice
         if: failure()
         run: echo "❌ Deployment to ${{ secrets.DOMAIN }} failed"
-
-        
