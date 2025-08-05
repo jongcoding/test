@@ -1,7 +1,7 @@
 # 1) HTTP → HTTPS 리다이렉트 + ACME
 server {
     listen 80;
-    server_name ${DOMAIN};
+    server_name $DOMAIN;
 
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/certbot;
@@ -18,10 +18,10 @@ server {
 
     listen 443 ssl;
 
-    server_name ${DOMAIN};
+    server_name $DOMAIN;
 
-    ssl_certificate     /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
     include             /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
 
