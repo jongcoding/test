@@ -7,7 +7,7 @@ on:
     tags:     [ 'v*.*.*' ]
 
 ###############################################################################
-# 1) Build & Push – Docker Hub
+# 1) Build & Push
 ###############################################################################
 jobs:
   build-and-push:
@@ -18,7 +18,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
@@ -49,7 +48,7 @@ jobs:
           cache-to:   type=gha,mode=max
 
 ###############################################################################
-# 2) Deploy – GCE VM
+# 2) Deploy
 ###############################################################################
   deploy:
     needs: build-and-push
@@ -63,7 +62,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ── SSH 준비 ──────────────────────────────────────────
+      # SSH 준비 --------------------------------------------------------------
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -79,7 +78,7 @@ jobs:
       - name: Test SSH
         run: ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
 
-      # ── ① 원격 디렉터리 & .env ───────────────────────────
+      # ① 디렉터리 & .env -----------------------------------------------------
       - name: Prepare app directory & .env
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
@@ -92,7 +91,7 @@ jobs:
             EOT
           EOF
 
-      # ── ② HTTP‑only 템플릿 & Compose 업로드 ───────────────
+      # ② HTTP‑only 템플릿 & Compose -----------------------------------------
       - name: Upload HTTP‑only Nginx template + compose
         run: |
           scp -o StrictHostKeyChecking=no nginx/default.http.conf.template \
@@ -100,7 +99,7 @@ jobs:
           scp -o StrictHostKeyChecking=no docker-compose.prod.yml \
               ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/"
 
-      # ── ③ 스택 기동(80) ───────────────────────────────────
+      # ③ 스택 기동(80) -------------------------------------------------------
       - name: Start HTTP‑only stack
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
@@ -109,7 +108,7 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d nginx web
           "
 
-      # ── ④ HTTP 응답 대기 ─────────────────────────────────
+      # ④ HTTP 응답 대기 ------------------------------------------------------
       - name: Wait for HTTP
         run: |
           for i in {1..24}; do
@@ -117,18 +116,20 @@ jobs:
             echo "...waiting HTTP ($i/24)"; sleep 5
           done
 
-      # ── ⑤ 인증서 발급 ─────────────────────────────────────
+      # ⑤ 인증서 발급 / 필요 시 갱신 -----------------------------------------
       - name: Issue / Renew SSL
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
             cd '${{ env.REMOTE_DIR }}' &&
             docker compose -f docker-compose.prod.yml run --rm certbot \
               certonly --webroot -w /var/www/certbot \
+              --non-interactive \
+              --keep-until-expiring \
               --email '${{ env.LETSENCRYPT_EMAIL }}' -d '${{ env.DOMAIN }}' \
               --agree-tos --no-eff-email --rsa-key-size 4096
           "
 
-      # ── ⑥‑A SSL helper 파일 복사 ──────────────────────────
+      # ⑥‑A SSL helper 파일 복사 ---------------------------------------------
       - name: Provide ssl helper files for nginx
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
@@ -137,27 +138,23 @@ jobs:
               sh -exc '
                 OPTIONS=/etc/letsencrypt/options-ssl-nginx.conf
                 DHPARAM=/etc/letsencrypt/ssl-dhparams.pem
-
-                # 1) options‑ssl‑nginx.conf
                 if [ ! -f \"$OPTIONS\" ]; then
                   SRC=$(find /usr -path \"*options-ssl-nginx.conf\" | head -n1)
                   cp \"$SRC\" \"$OPTIONS\"
                 fi
-
-                # 2) ssl‑dhparams.pem
                 if [ ! -f \"$DHPARAM\" ]; then
                   openssl dhparam -out \"$DHPARAM\" 4096
                 fi
               '
           "
 
-      # ── ⑦ HTTPS 템플릿 업로드 ─────────────────────────────
+      # ⑦ HTTPS 템플릿 --------------------------------------------------------
       - name: Upload HTTPS Nginx template
         run: |
           scp -o StrictHostKeyChecking=no nginx/default.https.conf.template \
               ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/nginx/default.conf.template"
 
-      # ── ⑧ conf 재생성 & nginx reload ─────────────────────
+      # ⑧ conf 재생성 & nginx reload -----------------------------------------
       - name: Apply HTTPS config & reload nginx
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
@@ -168,7 +165,7 @@ jobs:
             \"
           "
 
-      # ── ⑨ 최신 이미지 pull & 전체 스택 재기동(선택) ───────
+      # ⑨ 최신 이미지 pull & 전체 스택 ---------------------------------------
       - name: Deploy latest stack
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
@@ -177,7 +174,7 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
           "
 
-      # ── ⑩ HTTPS 검증 ─────────────────────────────────────
+      # ⑩ HTTPS 검증 ---------------------------------------------------------
       - name: Verify HTTPS
         run: |
           for i in {1..12}; do
@@ -185,13 +182,13 @@ jobs:
             echo "...waiting HTTPS ($i/12)"; sleep 10
           done
 
-      # ── ⑪ 오래된 이미지 정리 ──────────────────────────────
+      # ⑪ 이미지 정리 --------------------------------------------------------
       - name: Prune images
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "docker image prune -f --filter 'until=24h' || true"
 
 ###############################################################################
-# 3) 알림(예시) – 성공/실패 출력만
+# 3) 알림(예시)
 ###############################################################################
   notify:
     needs: [ build-and-push, deploy ]
