@@ -183,7 +183,7 @@ jobs:
       # ── 8. conf 재생성 & nginx reload ───────────────────────────────────
       - name: Apply HTTPS config & reload nginx
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} << 'EOF'
             cd '${{ env.REMOTE_DIR }}' &&
             docker compose -f docker-compose.prod.yml exec nginx sh -c '
              # 모든 환경변수 치환 (여기선 DOMAIN)
