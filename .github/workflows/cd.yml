@@ -133,45 +133,45 @@ jobs:
       # ── 6. SSL helper 파일 확보(+디렉터리 보장) ──────────────────────────
       - name: Provide ssl helper files for nginx
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
-            cd '${{ env.REMOTE_DIR }}' &&
-            docker compose -f docker-compose.prod.yml run --rm --entrypoint \"\" certbot \
-              sh -euxc '
-                OPTIONS=/etc/letsencrypt/options-ssl-nginx.conf
-                DHPARAM=/etc/letsencrypt/ssl-dhparams.pem
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} << 'EOF'
+            cd '${{ env.REMOTE_DIR }}'
+            docker compose -f docker-compose.prod.yml run --rm --entrypoint "" certbot sh -euxc '
+              OPTIONS=/etc/letsencrypt/options-ssl-nginx.conf
+              DHPARAM=/etc/letsencrypt/ssl-dhparams.pem
 
-                # 0) 반드시 디렉터리 확보 ── (dirname 대신 상수 경로)
-                mkdir -p /etc/letsencrypt
+              # 0) 반드시 디렉터리 확보
+              mkdir -p /etc/letsencrypt
 
-                # 1) options‑ssl‑nginx.conf 확보
-                if [ ! -f \"$OPTIONS\" ]; then
-                  SRC=$(find /usr /opt -maxdepth 7 -type f -name options-ssl-nginx.conf 2>/dev/null | head -n1 || true)
-                  if [ -n \"$SRC\" ]; then
-                    cp \"$SRC\" \"$OPTIONS\"
-                  elif command -v curl >/dev/null 2>&1; then
-                    curl -fsSL \
-                      https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
-                      -o \"$OPTIONS\" || true
-                  fi
+              # 1) options-ssl-nginx.conf 확보
+              if [ ! -f "$OPTIONS" ]; then
+                SRC=$(find /usr /opt -maxdepth 7 -type f -name options-ssl-nginx.conf 2>/dev/null | head -n1 || true)
+                if [ -n "$SRC" ]; then
+                  cp "$SRC" "$OPTIONS"
+                elif command -v curl >/dev/null 2>&1; then
+                  curl -fsSL \
+                    https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
+                    -o "$OPTIONS" || true
                 fi
+              fi
 
-                # 1‑b) 최소 TLS 설정 (fallback)
-                if [ ! -s \"$OPTIONS\" ]; then
-                  printf \"%s\\n\" \
-                    \"ssl_session_cache   shared:SSL:10m;\" \
-                    \"ssl_session_timeout 1h;\" \
-                    \"ssl_prefer_server_ciphers on;\" \
-                    \"ssl_protocols TLSv1.2 TLSv1.3;\" \
-                    \"ssl_ciphers EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH;\" \
-                    > \"$OPTIONS\"
-                fi
+              # 1-b) 최소 TLS 설정 (fallback)
+              if [ ! -s "$OPTIONS" ]; then
+                printf "%s\n" \
+                  "ssl_session_cache   shared:SSL:10m;" \
+                  "ssl_session_timeout 1h;" \
+                  "ssl_prefer_server_ciphers on;" \
+                  "ssl_protocols TLSv1.2 TLSv1.3;" \
+                  "ssl_ciphers EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH;" \
+                  > "$OPTIONS"
+              fi
 
-                # 2) ssl‑dhparams.pem (없으면 2048bit 생성)
-                if [ ! -f \"$DHPARAM\" ]; then
-                  openssl dhparam -out \"$DHPARAM\" 2048
-                fi
-              '
-          "
+              # 2) ssl-dhparams.pem (없으면 2048bit 생성)
+              if [ ! -f "$DHPARAM" ]; then
+                openssl dhparam -out "$DHPARAM" 2048
+              fi
+            '
+          EOF
+
 
 
       # ── 7. HTTPS 템플릿 업로드 ───────────────────────────────────────────
