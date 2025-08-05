@@ -186,10 +186,12 @@ jobs:
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
             cd '${{ env.REMOTE_DIR }}' &&
             docker compose -f docker-compose.prod.yml exec nginx sh -c '
-              envsubst \"\\$DOMAIN\" < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf &&
-              nginx -s reload
-            '
-          "
+             # 모든 환경변수 치환 (여기선 DOMAIN)
+             envsubst < /etc/nginx/templates/default.conf.template \
+               > /etc/nginx/conf.d/default.conf &&
+             nginx -s reload
+           '
+          EOF
 
       # ── 9. 최신 이미지 pull & 전체 스택 ─────────────────────────────────
       - name: Deploy latest stack
