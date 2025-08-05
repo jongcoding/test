@@ -48,7 +48,7 @@ jobs:
           cache-to:   type=gha,mode=max
 
 ###############################################################################
-# 2) Deploy – GCE VM
+# 2) Deploy – GCE VM
 ###############################################################################
   deploy:
     needs: build-and-push
@@ -112,8 +112,11 @@ jobs:
       - name: Wait for HTTP
         run: |
           for i in {1..24}; do
-            curl -sSf -m 5 http://${{ env.DOMAIN }} >/dev/null && echo 'HTTP OK' && break
-            echo \"...waiting HTTP ($i/24)\"; sleep 5
+            if curl -sSf -m 5 http://${{ env.DOMAIN }} >/dev/null 2>&1; then
+              echo "HTTP OK"; break
+            fi
+            echo "...waiting HTTP (${i}/24)"
+            sleep 5
           done
 
       # ── ⑤ 인증서 발급 / 필요 시 갱신 ────────────────────────────────────
@@ -138,32 +141,28 @@ jobs:
                 OPTIONS=/etc/letsencrypt/options-ssl-nginx.conf
                 DHPARAM=/etc/letsencrypt/ssl-dhparams.pem
 
-                # ── options‑ssl‑nginx.conf ────────────────────────────────
+                # options‑ssl‑nginx.conf 확보
                 if [ ! -f \"$OPTIONS\" ]; then
-                  SRC=\$(find /usr /opt -maxdepth 6 -type f -name options-ssl-nginx.conf 2>/dev/null | head -n1 || true)
+                  SRC=$(find /usr /opt -maxdepth 7 -type f -name options-ssl-nginx.conf 2>/dev/null | head -n1 || true)
                   if [ -n \"$SRC\" ]; then
-                    echo \"[INFO] found → \$SRC\"
                     cp \"$SRC\" \"$OPTIONS\"
                   else
-                    echo \"[INFO] downloading from GitHub\"
                     curl -fsSL \
                       https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
                       -o \"$OPTIONS\" || {
-                        echo \"[WARN] fallback to minimal TLS config\"
                         cat > \"$OPTIONS\" <<'CONF'
-                        ssl_session_cache   shared:SSL:10m;
-                        ssl_session_timeout 1h;
-                        ssl_prefer_server_ciphers on;
-                        ssl_protocols TLSv1.2 TLSv1.3;
-                        ssl_ciphers EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH;
-                        CONF
+                      ssl_session_cache   shared:SSL:10m;
+                      ssl_session_timeout 1h;
+                      ssl_prefer_server_ciphers on;
+                      ssl_protocols TLSv1.2 TLSv1.3;
+                      ssl_ciphers EECDH+AESGCM:EDH+AESGCM:AES256+EECDH:AES256+EDH;
+                      CONF
                       }
                   fi
                 fi
 
-                # ── ssl‑dhparams.pem ─────────────────────────────────────
+                # ssl‑dhparams.pem (없으면 2048bit 생성)
                 if [ ! -f \"$DHPARAM\" ]; then
-                  echo \"[INFO] generating dhparam\"
                   openssl dhparam -out \"$DHPARAM\" 2048
                 fi
               '
@@ -199,8 +198,11 @@ jobs:
       - name: Verify HTTPS
         run: |
           for i in {1..12}; do
-            curl -sSf -m 5 https://${{ env.DOMAIN }} >/dev/null && echo 'HTTPS OK' && break
-            echo \"...waiting HTTPS ($i/12)\"; sleep 10
+            if curl -sSf -m 5 https://${{ env.DOMAIN }} >/dev/null 2>&1; then
+              echo "HTTPS OK"; break
+            fi
+            echo "...waiting HTTPS (${i}/12)"
+            sleep 10
           done
 
       # ── ⑪ 오래된 이미지 정리 ───────────────────────────────────────────
