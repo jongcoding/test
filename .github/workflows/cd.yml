@@ -132,7 +132,6 @@ jobs:
 
       # ── 6. SSL helper 파일 확보(+디렉터리 보장) ──────────────────────────
       - name: Provide ssl helper files for nginx
-      - name: Provide ssl helper files for nginx
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
             cd '${{ env.REMOTE_DIR }}' &&
