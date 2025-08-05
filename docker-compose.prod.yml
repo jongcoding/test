@@ -1,15 +1,19 @@
-# version: "3.9"   ← 경고만 유발하므로 삭제
+# version: "3.9"     # ← 경고만 유발하므로 그대로 생략
+
 services:
   web:
     image: ${DOCKERHUB_USERNAME}/myflask:latest
-    environment: [ FLASK_ENV=production ]
-    expose: [ "5000" ]
+    environment:           # ← 매핑 형식
+      FLASK_ENV: production
+    expose:
+      - "5000"
     restart: unless-stopped
 
   nginx:
     container_name: nginx
     image: nginx:alpine
-    depends_on: [ web ]
+    depends_on:
+      - web
     ports:
       - "80:80"
       - "443:443"
@@ -17,7 +21,8 @@ services:
       - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./certbot/config:/etc/letsencrypt:ro
       - ./certbot/www:/var/www/certbot:ro
-    environment: DOMAIN=${DOMAIN} 
+    environment:           # ← 매핑 형식
+      DOMAIN: ${DOMAIN}
     entrypoint:
       - sh
       - -exc
