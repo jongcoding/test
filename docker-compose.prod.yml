@@ -19,8 +19,8 @@ services:
       - "443:443"
     volumes:
       - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
-      - ./certbot/config:/etc/letsencrypt:ro
-      - ./certbot/www:/var/www/certbot:ro
+      - ./certbot/config:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
     environment:           # ← 매핑 형식
       DOMAIN: ${DOMAIN}
     entrypoint:
@@ -61,3 +61,9 @@ services:
                sleep 12h;
              done"
     restart: unless-stopped
+
+volumes:
+  certbot-config:
+    driver: local
+  certbot-www:
+    driver: local
