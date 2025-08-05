@@ -116,10 +116,18 @@ jobs:
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
             cd '${{ env.REMOTE_DIR }}' &&
-            docker compose -f docker-compose.prod.yml run --rm certbot \
-              certonly --webroot -w /var/www/certbot \
-              --email '${{ env.LETSENCRYPT_EMAIL }}' -d '${{ env.DOMAIN }}' \
-              --agree-tos --no-eff-email --rsa-key-size 4096
+            docker compose -f docker-compose.prod.yml run --rm certbot sh -c '
+              set -e
+              # 1) options-ssl-nginx.conf
+              if [ ! -f /etc/letsencrypt/options-ssl-nginx.conf ]; then
+                cp /usr/local/lib/python*/dist-packages/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf \
+                  /etc/letsencrypt/
+              fi
+              # 2) ssl-dhparams.pem (없으면 생성)
+              if [ ! -f /etc/letsencrypt/ssl-dhparams.pem ]; then
+                openssl dhparam -out /etc/letsencrypt/ssl-dhparams.pem 4096
+              fi
+            '
           "
 
       # ────── ⑥ HTTPS 템플릿 업로드 ──────────────────────────
