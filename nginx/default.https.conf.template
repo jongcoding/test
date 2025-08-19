@@ -3,6 +3,7 @@ server {
     listen 80;
     server_name $DOMAIN;
 
+    # Let’s Encrypt HTTP-01
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/certbot;
         allow all;
@@ -15,15 +16,47 @@ server {
 
 # 2) HTTPS 서비스
 server {
-
     listen 443 ssl;
-
     server_name $DOMAIN;
 
     ssl_certificate     /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
     include             /etc/letsencrypt/options-ssl-nginx.conf;
     ssl_dhparam         /etc/letsencrypt/ssl-dhparams.pem;
+
+    # ── ZAP 경고 대응: 서버 버전 노출/보안 헤더/캐시 ───────────────────────
+    server_tokens off;  # 10036: Server 헤더의 버전 숨김(완전 제거는 모듈 필요)
+
+    # 보안 헤더 (모든 응답에 always)
+    add_header X-Frame-Options "SAMEORIGIN" always;                       # 10020
+    add_header X-Content-Type-Options "nosniff" always;                   # 10021
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), camera=(), microphone=()" always;  # 10063
+    add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'" always;  # 10038 (앱에 맞게 조정 필수)
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;  # 10035 (HTTPS에서만)
+
+    # Spectre 완화(안전 옵션) – ZAP 90004 완화에 도움
+    add_header Cross-Origin-Opener-Policy "same-origin" always;           # COOP
+    add_header Cross-Origin-Resource-Policy "same-origin" always;         # CORP
+    # add_header Cross-Origin-Embedder-Policy "require-corp" always;      # COEP (리소스 헤더 요건 충족 전엔 주석 권장)
+
+    # 동적 응답 캐시 금지 – 10015/10049
+    add_header Cache-Control "no-store, no-cache, must-revalidate" always;
+    add_header Pragma "no-cache" always;
+
+    # 필요시 업스트림에서 보내는 민감 헤더 차단
+    proxy_hide_header X-Powered-By;
+    # proxy_hide_header Server;  # nginx 자체 Server 헤더는 완전 제거 어려움(모듈 필요)
+
+    # (선택) ZAP가 404로도 헤더를 체크하므로 간단 응답 제공
+    location = /robots.txt {
+        default_type text/plain;
+        return 200 "User-agent: *\nDisallow:\n";
+    }
+    location = /sitemap.xml {
+        default_type application/xml;
+        return 200 "<?xml version='1.0' encoding='UTF-8'?><urlset xmlns='http://www.sitemaps.org/schemas/sitemap/0.9'></urlset>";
+    }
 
     location / {
         proxy_pass http://web:5000;
