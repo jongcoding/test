@@ -3,7 +3,7 @@ name: DAST – ZAP Baseline
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 18 * * *"   # 매일 03:00 KST (UTC 18:00)
+    - cron: "0 18 * * *"   # 매일 03:00 KST
   push:
     branches: [ main ]
 
@@ -12,7 +12,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write   # SARIF 업로드
+      security-events: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -20,35 +21,17 @@ jobs:
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: https://${{ secrets.DOMAIN }}
-          rules_file_name: .zap/rules.tsv   # 허용/무시 목록
+          rules_file_name: .zap/rules.tsv
           cmd_options: >-
-            -m 5                           # passive + 크롤링 5분
-            -a                             # alpha rule 포함(원하면 제거)
+            -m 5         # passive + 5분
+            -a           # alpha 규칙 포함(원치 않으면 제거)
           allow_issue_writing: false
-          fail_action: false               # 처음엔 실패 안 하게; 안정화 후 true
+          artifact_name: zap-scan          # ← 언더스코어 대신 하이픈
+          fail_action: false               # 안정화 후 true
 
-      - name: Upload ZAP report (HTML)
-        uses: actions/upload-artifact@v4
-        with:
-          name: zap-baseline-report
-          path: report_html.html
-
-      - name: Convert ZAP report to SARIF (optional)
-        run: |
-          # action-baseline이 생성한 report_json.json을 SARIF로 변환하고 싶다면
-          python - <<'PY'
-          import json, sys
-          src='report_json.json'
-          dst='zap.sarif'
-          if not __import__('os').path.exists(src):
-              open(dst,'w').write('{"runs": []}')
-              sys.exit(0)
-          # 아주 간단한 placeholder SARIF (정식 변환기는 별도 사용 권장)
-          data=json.load(open(src))
-          open(dst,'w').write('{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"ZAP"}},"results":[]}]}')
-          PY
-
-      - name: Upload SARIF (optional)
+      # HTML/JSON 리포트는 액션이 자동으로 아티팩트로 올림.
+      # 추가로 SARIF 올리고 싶다면:
+      - name: Upload empty SARIF (optional placeholder)
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: zap.sarif
+          sarif_file: .github/empty.sarif
