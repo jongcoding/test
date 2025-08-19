@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write   # SARIF 업로드용 권한
+      security-events: write   # SARIF 업로드용
 
     steps:
       - name: Check out repository
@@ -25,9 +25,9 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y jq
 
-      # ────────────────────────────────────────────────────────────────────
-      # Python tooling (Semgrep/Bandit/pip-audit)
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
+      # Python tooling
+      # ──────────────────────────────
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -39,9 +39,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install semgrep bandit pip-audit
 
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
       # Semgrep (SAST)
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
       - name: Semgrep (OWASP + Python)
         run: |
           set -euo pipefail
@@ -51,16 +51,11 @@ jobs:
         id: semgrep_sarif_check
         run: |
           if [ ! -s semgrep.sarif ]; then
-            echo "ok=false" >> $GITHUB_OUTPUT
-            exit 0
+            echo "ok=false" >> $GITHUB_OUTPUT; exit 0
           fi
           runs=$(jq '.runs | length' semgrep.sarif 2>/dev/null || echo 0)
           results=$(jq '[.runs[].results] | flatten | length' semgrep.sarif 2>/dev/null || echo 0)
-          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then
-            echo "ok=true" >> $GITHUB_OUTPUT
-          else
-            echo "ok=false" >> $GITHUB_OUTPUT
-          fi
+          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
 
       - name: Upload Semgrep SARIF
         if: ${{ steps.semgrep_sarif_check.outputs.ok == 'true' }}
@@ -68,9 +63,9 @@ jobs:
         with:
           sarif_file: semgrep.sarif
 
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
       # Bandit (Python SAST)
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
       - name: Bandit
         run: |
           set -euo pipefail
@@ -80,16 +75,11 @@ jobs:
         id: bandit_sarif_check
         run: |
           if [ ! -s bandit.sarif ]; then
-            echo "ok=false" >> $GITHUB_OUTPUT
-            exit 0
+            echo "ok=false" >> $GITHUB_OUTPUT; exit 0
           fi
           runs=$(jq '.runs | length' bandit.sarif 2>/dev/null || echo 0)
           results=$(jq '[.runs[].results] | flatten | length' bandit.sarif 2>/dev/null || echo 0)
-          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then
-            echo "ok=true" >> $GITHUB_OUTPUT
-          else
-            echo "ok=false" >> $GITHUB_OUTPUT
-          fi
+          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
 
       - name: Upload Bandit SARIF
         if: ${{ steps.bandit_sarif_check.outputs.ok == 'true' }}
@@ -97,58 +87,68 @@ jobs:
         with:
           sarif_file: bandit.sarif
 
-      # ────────────────────────────────────────────────────────────────────
-      # pip-audit (Python deps CVE) - 리포트 모드
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
+      # pip-audit (deps CVE) – 리포트 모드
+      # ──────────────────────────────
       - name: pip-audit
         run: |
           if [ -f requirements.txt ]; then
-            # 처음엔 리포트만; 게이트 원하면 '|| true' 제거
             pip-audit -r requirements.txt --strict || true
           fi
 
-      # ────────────────────────────────────────────────────────────────────
-      # Hadolint (Dockerfile Lint) → Dockerfile 자동 탐색 + SARIF 업로드
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
+      # Hadolint (Dockerfile Lint)
+      #  - dockerfile / *.dockerfile 자동탐색
+      #  - 단일: 액션 입력 dockerfile 사용
+      #  - 다중: 컨테이너 직접 호출
+      # ──────────────────────────────
       - name: Locate Dockerfile(s)
         id: df
         shell: bash
         run: |
-            set -euo pipefail
-            # 모든 경로에서 dockerfile/Dockerfile, *.Dockerfile, *dockerfile* 케이스 전부 매칭
-            mapfile -t files < <(find . -type f \( -iname "dockerfile" -o -iname "*dockerfile*" \) | sort || true)
-            if [ ${#files[@]} -eq 0 ]; then
+          set -euo pipefail
+          mapfile -t files < <(find . -type f \( -iname "dockerfile" -o -iname "*.dockerfile" \) | sort || true)
+          if [ ${#files[@]} -eq 0 ]; then
             echo "found=false" >> $GITHUB_OUTPUT
+            echo "count=0"     >> $GITHUB_OUTPUT
             echo "No Dockerfile found. Skipping hadolint."
-            else
-            printf '%s ' "${files[@]}" > dockerfiles.list
-            echo "found=true" >> $GITHUB_OUTPUT
-            echo "files=$(cat dockerfiles.list)" >> $GITHUB_OUTPUT
-            echo "Found Dockerfiles:"; cat dockerfiles.list
-            fi
+            exit 0
+          fi
+          printf '%s\n' "${files[@]}" > dockerfiles.list
+          echo "found=true"           >> $GITHUB_OUTPUT
+          echo "count=${#files[@]}"   >> $GITHUB_OUTPUT
+          echo "first=${files[0]}"    >> $GITHUB_OUTPUT
+          echo "Found Dockerfiles:"; cat dockerfiles.list
 
-
-      - name: Hadolint
-        if: ${{ steps.df.outputs.found == 'true' }}
+      - name: Hadolint (single file)
+        if: ${{ steps.df.outputs.found == 'true' && steps.df.outputs.count == '1' }}
         uses: hadolint/hadolint-action@v3.1.0
         with:
-          args: --format sarif -o hadolint.sarif ${{ steps.df.outputs.files }}
+          dockerfile: ${{ steps.df.outputs.first }}
+          format: sarif
+          output-file: hadolint.sarif
+
+      - name: Hadolint (multi-file via CLI)
+        if: ${{ steps.df.outputs.found == 'true' && steps.df.outputs.count != '1' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < dockerfiles.list
+          docker run --rm -v "$PWD":/work -w /work hadolint/hadolint:latest \
+            hadolint --format sarif "${files[@]}" > hadolint.sarif || true
+          # 빈 파일 방지
+          test -s hadolint.sarif || echo '{"version":"2.1.0","runs":[]}' > hadolint.sarif
 
       - name: Check Hadolint SARIF has results
         if: ${{ steps.df.outputs.found == 'true' }}
         id: hadolint_sarif_check
         run: |
           if [ ! -s hadolint.sarif ]; then
-            echo "ok=false" >> $GITHUB_OUTPUT
-            exit 0
+            echo "ok=false" >> $GITHUB_OUTPUT; exit 0
           fi
           runs=$(jq '.runs | length' hadolint.sarif 2>/dev/null || echo 0)
           results=$(jq '[.runs[].results] | flatten | length' hadolint.sarif 2>/dev/null || echo 0)
-          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then
-            echo "ok=true" >> $GITHUB_OUTPUT
-          else
-            echo "ok=false" >> $GITHUB_OUTPUT
-          fi
+          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
 
       - name: Upload Hadolint SARIF
         if: ${{ steps.df.outputs.found == 'true' && steps.hadolint_sarif_check.outputs.ok == 'true' }}
@@ -156,9 +156,9 @@ jobs:
         with:
           sarif_file: hadolint.sarif
 
-      # ────────────────────────────────────────────────────────────────────
-      # Trivy (filesystem scan) → SARIF 업로드
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
+      # Trivy (filesystem scan)
+      # ──────────────────────────────
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@0.28.0
         with:
@@ -173,16 +173,11 @@ jobs:
         id: trivyfs_sarif_check
         run: |
           if [ ! -s trivy-fs.sarif ]; then
-            echo "ok=false" >> $GITHUB_OUTPUT
-            exit 0
+            echo "ok=false" >> $GITHUB_OUTPUT; exit 0
           fi
           runs=$(jq '.runs | length' trivy-fs.sarif 2>/dev/null || echo 0)
           results=$(jq '[.runs[].results] | flatten | length' trivy-fs.sarif 2>/dev/null || echo 0)
-          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then
-            echo "ok=true" >> $GITHUB_OUTPUT
-          else
-            echo "ok=false" >> $GITHUB_OUTPUT
-          fi
+          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
 
       - name: Upload Trivy SARIF
         if: ${{ steps.trivyfs_sarif_check.outputs.ok == 'true' }}
@@ -190,9 +185,9 @@ jobs:
         with:
           sarif_file: trivy-fs.sarif
 
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
       # Gitleaks (Secrets)
-      # ────────────────────────────────────────────────────────────────────
+      # ──────────────────────────────
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@v2
         with:
