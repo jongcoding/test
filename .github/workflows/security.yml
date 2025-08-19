@@ -108,14 +108,34 @@ jobs:
           fi
 
       # ────────────────────────────────────────────────────────────────────
-      # Hadolint (Dockerfile Lint) → SARIF 업로드
+      # Hadolint (Dockerfile Lint) → Dockerfile 자동 탐색 + SARIF 업로드
       # ────────────────────────────────────────────────────────────────────
+      - name: Locate Dockerfile(s)
+        id: df
+        shell: bash
+        run: |
+            set -euo pipefail
+            # 모든 경로에서 dockerfile/Dockerfile, *.Dockerfile, *dockerfile* 케이스 전부 매칭
+            mapfile -t files < <(find . -type f \( -iname "dockerfile" -o -iname "*dockerfile*" \) | sort || true)
+            if [ ${#files[@]} -eq 0 ]; then
+            echo "found=false" >> $GITHUB_OUTPUT
+            echo "No Dockerfile found. Skipping hadolint."
+            else
+            printf '%s ' "${files[@]}" > dockerfiles.list
+            echo "found=true" >> $GITHUB_OUTPUT
+            echo "files=$(cat dockerfiles.list)" >> $GITHUB_OUTPUT
+            echo "Found Dockerfiles:"; cat dockerfiles.list
+            fi
+
+
       - name: Hadolint
+        if: ${{ steps.df.outputs.found == 'true' }}
         uses: hadolint/hadolint-action@v3.1.0
         with:
-          args: --format sarif -o hadolint.sarif Dockerfile
+          args: --format sarif -o hadolint.sarif ${{ steps.df.outputs.files }}
 
       - name: Check Hadolint SARIF has results
+        if: ${{ steps.df.outputs.found == 'true' }}
         id: hadolint_sarif_check
         run: |
           if [ ! -s hadolint.sarif ]; then
@@ -131,7 +151,7 @@ jobs:
           fi
 
       - name: Upload Hadolint SARIF
-        if: ${{ steps.hadolint_sarif_check.outputs.ok == 'true' }}
+        if: ${{ steps.df.outputs.found == 'true' && steps.hadolint_sarif_check.outputs.ok == 'true' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: hadolint.sarif
