@@ -14,11 +14,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write   # SARIF 업로드용
+      security-events: write     # SARIF 업로드
+      pull-requests: write       # (선택) PR 코멘트용
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0         # gitleaks가 히스토리 스캔 가능
 
       - name: Ensure jq (for SARIF checks)
         run: |
@@ -136,7 +139,6 @@ jobs:
           mapfile -t files < dockerfiles.list
           docker run --rm -v "$PWD":/work -w /work hadolint/hadolint:latest \
             hadolint --format sarif "${files[@]}" > hadolint.sarif || true
-          # 빈 파일 방지
           test -s hadolint.sarif || echo '{"version":"2.1.0","runs":[]}' > hadolint.sarif
 
       - name: Check Hadolint SARIF has results
@@ -186,9 +188,13 @@ jobs:
           sarif_file: trivy-fs.sarif
 
       # ──────────────────────────────
-      # Gitleaks (Secrets)
+      # Gitleaks (Secrets) — v2: env로 설정 + GITHUB_TOKEN 필요
       # ──────────────────────────────
       - name: Gitleaks
         uses: gitleaks/gitleaks-action@v2
-        with:
-          args: --verbose --redact --exit-code 1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_CONFIG: .gitleaks.toml
+          # GITLEAKS_ENABLE_COMMENTS: "true"
+          # GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
+          # GITLEAKS_ENABLE_SUMMARY: "true"
