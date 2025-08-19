@@ -2,10 +2,10 @@ name: DAST – ZAP Baseline
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 18 * * *"   # 매일 03:00 KST
   push:
     branches: [ main ]
+  schedule:
+    - cron: "0 18 * * *"   # 매일 03:00 KST (UTC 18:00)
 
 jobs:
   zap-baseline:
@@ -15,23 +15,49 @@ jobs:
       security-events: write
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out
+        uses: actions/checkout@v4
+
+      # 룰 파일이 레포에 없을 경우 생성(있으면 그대로 사용)
+      - name: Ensure .zap/rules.tsv exists
+        run: |
+          mkdir -p .zap
+          if [ ! -f .zap/rules.tsv ]; then
+            cat > .zap/rules.tsv <<'TSV'
+                # pluginId<TAB>action<TAB>newConfidence(optional)
+                10035  WARN
+                10020  WARN
+                10021  WARN
+                10038  WARN
+                10063  WARN
+                10049  IGNORE
+                10015  IGNORE
+                90004  IGNORE
+                TSV
+          fi
+          echo "---- .zap/rules.tsv ----"
+          cat .zap/rules.tsv
 
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
           target: https://${{ secrets.DOMAIN }}
           rules_file_name: .zap/rules.tsv
-          cmd_options: >-
-            -m 5         # passive + 5분
-            -a           # alpha 규칙 포함(원치 않으면 제거)
-          allow_issue_writing: false
-          artifact_name: zap-scan          # ← 언더스코어 대신 하이픈
-          fail_action: false               # 안정화 후 true
+          # 5분 크롤링, 알파 룰 포함(원치 않으면 -a 제거)
+          cmd_options: "-m 5 -a"
+          # artifact 이름: 영문+숫자만 (문제 회피)
+          artifact_name: zapscan
+          # 안정화 후 true로 바꿔 '게이트'로 사용 가능
+          fail_action: false
 
-      # HTML/JSON 리포트는 액션이 자동으로 아티팩트로 올림.
-      # 추가로 SARIF 올리고 싶다면:
-      - name: Upload empty SARIF (optional placeholder)
-        uses: github/codeql-action/upload-sarif@v3
+      # 내부 업로드가 삐끗해도 백업으로 수동 업로드
+      - name: Upload ZAP reports (manual fallback)
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: .github/empty.sarif
+          name: zapscan_files
+          path: |
+            report_html.html
+            report_md.md
+            report_json.json
+          retention-days: 7
