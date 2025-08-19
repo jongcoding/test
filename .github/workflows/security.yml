@@ -1,0 +1,70 @@
+name: Security – SAST & SCA
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # SARIF 업로드에 필요
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python 툴 설치 (Semgrep/Bandit/pip-audit)
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Install security tooling
+        run: pip install semgrep bandit pip-audit
+
+      # Semgrep (룰 기반 SAST)
+      - name: Semgrep (OWASP + Python)
+        run: semgrep ci --config p/owasp-top-ten --config p/python --sarif -o semgrep.sarif || true
+      - name: Upload Semgrep SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: semgrep.sarif }
+
+      # Bandit (Python SAST)
+      - name: Bandit
+        run: bandit -r . -f sarif -o bandit.sarif || true
+      - name: Upload Bandit SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: bandit.sarif }
+
+      # pip-audit (의존성 취약점)
+      - name: pip-audit
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt --strict
+          fi
+
+      # Hadolint (Dockerfile 린트)
+      - name: Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with: { dockerfile: Dockerfile }
+
+      # Trivy (소스 트리 스캔)
+      - name: Trivy filesystem scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+          format: sarif
+          output: trivy-fs.sarif
+          exit-code: '0'     # 처음엔 리포트 모드, 게이트로 쓰려면 1
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with: { sarif_file: trivy-fs.sarif }
+
+      # Gitleaks (Secret 스캔)
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        with: { args: --verbose --redact --exit-code 1 }
