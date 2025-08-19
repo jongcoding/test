@@ -1,19 +1,18 @@
-name: Security – DAST (ZAP Baseline)
+name: Security – DAST (ZAP Baseline, manual docker)
 
 on:
   workflow_dispatch:
   push:
     branches: [ main ]
   schedule:
-    - cron: "0 0 * * 1"   # 매주 월요일 00:00 UTC (KST 월 09:00)
+    - cron: "0 0 * * 1"   # 매주 월요일 00:00 UTC
 
 jobs:
   zap_scan:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # 이슈 자동 생성 원하면 ↓ 해제하고 allow_issue_writing: 'true' 로
-      # issues: write
+      actions: write   # 수동 업로드 문제 없게 여유로 부여
 
     env:
       TARGET: https://${{ secrets.DOMAIN }}
@@ -22,7 +21,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # rules.tsv = <id>\t<level>\t<note>  (탭 필수)
+      # ZAP 예외/완화 규칙 (탭 구분 필수)
       - name: Prepare ZAP rules.tsv
         shell: bash
         run: |
@@ -30,7 +29,6 @@ jobs:
           mkdir -p .zap
           : > .zap/rules.tsv
           printf '10015\tWARN\tCache-Control tune when behind CDN\n' >> .zap/rules.tsv
-          printf '10020\tWARN\tAdd X-Frame-Options/frame-ancestors later\n' >> .zap/rules.tsv
           printf '10021\tWARN\tAdd X-Content-Type-Options nosniff\n' >> .zap/rules.tsv
           printf '10035\tWARN\tEnable HSTS after HTTPS stable\n' >> .zap/rules.tsv
           printf '10036\tWARN\tHide Server header via nginx\n' >> .zap/rules.tsv
@@ -39,28 +37,42 @@ jobs:
           printf '10063\tWARN\tAdd Permissions-Policy\n' >> .zap/rules.tsv
           printf '90004\tWARN\tSpectre isolation (COOP/COEP)\n' >> .zap/rules.tsv
           printf '90005\tIGNORE\tSec-Fetch-* are request headers (browser only)\n' >> .zap/rules.tsv
-          echo "---- .zap/rules.tsv (showing tabs as ^I) ----"
+          echo "---- .zap/rules.tsv (tabs shown as ^I) ----"
           cat -v .zap/rules.tsv
 
-      # 컨테이너가 /zap/wrk/* 파일 쓰는 권한 경고 완화
-      - name: Loosen workspace perms for container
+      # 컨테이너가 /zap/wrk에 쓰도록 퍼미션 완화
+      - name: Loosen workspace perms
         run: sudo chmod -R a+rwX .
 
-      - name: ZAP Baseline Scan (reports only)
-        uses: zaproxy/action-baseline@v0.12.0
-        with:
-          docker_name: 'ghcr.io/zaproxy/zaproxy:stable'
-          target: ${{ env.TARGET }}
-          rules_file_name: '.zap/rules.tsv'
-          artifact_name: ''                 # 내부 아티팩트 업로드 비활성화(400 회피)
-          allow_issue_writing: 'false'      # 이슈 생성 비활성화
-          cmd_options: >-
-            -m 5 -a
-            -J report_json.json
-            -w report_md.md
-            -r report_html.html
+      # ZAP 컨테이너 직접 실행 (Baseline)
+      - name: Run ZAP Baseline (docker)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull ghcr.io/zaproxy/zaproxy:stable
+          docker run --rm --network=host \
+            -v "$PWD":/zap/wrk \
+            -e ZAP_AUTH_HEADER="${{ secrets.ZAP_AUTH_HEADER }}" \
+            -e ZAP_AUTH_HEADER_VALUE="${{ secrets.ZAP_AUTH_HEADER_VALUE }}" \
+            -e ZAP_AUTH_HEADER_SITE="${{ secrets.ZAP_AUTH_HEADER_SITE }}" \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py \
+              -t "${TARGET}" \
+              -m 5 -a \
+              -c .zap/rules.tsv \
+              -J report_json.json \
+              -w report_md.md \
+              -r report_html.html
 
-      - name: Upload ZAP reports (manual)
+      # GitHub Job Summary 에 MD 요약 붙이기 (보기 편하게)
+      - name: Append summary
+        if: always()
+        run: |
+          echo "## ZAP Baseline Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          sed -e 's/\r$//' report_md.md >> $GITHUB_STEP_SUMMARY || true
+
+      - name: Upload ZAP reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
