@@ -1,65 +1,68 @@
-name: DAST – ZAP Baseline
+name: Security – DAST (ZAP Baseline)
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 1"   # 매주 월요일 00:00 UTC
   push:
     branches: [ main ]
-  schedule:
-    - cron: "0 18 * * *"   # 매일 03:00 KST
 
 jobs:
-  zap-baseline:
+  zap_scan:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      security-events: write
+      issues: write          # (선택) 이슈 코멘트/생성에 쓰려면
+      actions: read
+    env:
+      TARGET: https://${{ secrets.DOMAIN }}   # 예: https://jongyun.mjsec.kr
 
     steps:
-      - name: Check out
+      - name: Checkout
         uses: actions/checkout@v4
 
-      # 여기서 .zap/rules.tsv를 안전하게 생성 (탭 사용)
-      - name: Ensure .zap/rules.tsv exists
-        shell: bash
+      # rules.tsv 생성 (탭으로 3토큰 이상, printf가 \t를 탭으로 변환)
+      - name: Prepare ZAP rules.tsv (make header-findings WARN not FAIL)
         run: |
-          set -euo pipefail
           mkdir -p .zap
-          if [ ! -f .zap/rules.tsv ]; then
-            {
-              printf '# pluginId\taction\tnewConfidence(optional)\n'
-              printf '10035\tWARN\n'    # HSTS not set
-              printf '10020\tWARN\n'    # Anti-clickjacking
-              printf '10021\tWARN\n'    # X-Content-Type-Options
-              printf '10038\tWARN\n'    # CSP
-              printf '10063\tWARN\n'    # Permissions-Policy
-              printf '10049\tIGNORE\n'  # Storable and Cacheable
-              printf '10015\tIGNORE\n'  # Re-examine Cache-control
-              printf '90004\tIGNORE\n'  # Spectre
-            } > .zap/rules.tsv
-          fi
-          echo "---- .zap/rules.tsv ----"
-          cat .zap/rules.tsv | sed -n '1,20p'
+          : > .zap/rules.tsv
+          printf '10015\tWARN\tCache-Control tuning while behind CDN\n' >> .zap/rules.tsv
+          printf '10020\tWARN\tX-Frame-Options / frame-ancestors to be added\n' >> .zap/rules.tsv
+          printf '10021\tWARN\tAdd X-Content-Type-Options: nosniff\n' >> .zap/rules.tsv
+          printf '10035\tWARN\tEnable HSTS after TLS stabilized\n' >> .zap/rules.tsv
+          printf '10036\tWARN\tHide Server header via Nginx\n' >> .zap/rules.tsv
+          printf '10038\tWARN\tAdd CSP header (baseline)\n' >> .zap/rules.tsv
+          printf '10049\tWARN\tCacheability to be tuned\n' >> .zap/rules.tsv
+          printf '10063\tWARN\tAdd Permissions-Policy\n' >> .zap/rules.tsv
+          printf '90004\tWARN\tSpectre isolation (COOP/COEP)\n' >> .zap/rules.tsv
+
+      # 컨테이너가 리포트/AF yaml 쓰기 실패하는 경고 줄이기
+      - name: Loosen workspace perms for ZAP container (optional)
+        run: sudo chmod -R a+rwX .
 
       - name: ZAP Baseline Scan
         uses: zaproxy/action-baseline@v0.12.0
         with:
-          target: https://${{ secrets.DOMAIN }}
-          rules_file_name: .zap/rules.tsv
-          # 5분 크롤링 + 알파 룰 (원치 않으면 -a 제거)
-          cmd_options: "-m 5 -a"
-          #  아티팩트 이름: 영문/숫자만 (400 회피)
-          artifact_name: zapscan
-          # 안정화 후 true로 바꾸면 DAST도 게이트로 사용 가능
-          fail_action: false
+          docker_name: 'ghcr.io/zaproxy/zaproxy:stable'
+          target: ${{ env.TARGET }}
+          rules_file_name: '.zap/rules.tsv'
+          allow_issue_writing: 'false'     # 원하면 true
+          artifact_name: 'zapscan'         # 영문/숫자만(하이픈 피하기)
+          cmd_options: >-
+            -J report_json.json
+            -w report_md.md
+            -r report_html.html
+            -m 5
+            -a
 
-      # 내부 업로드가 실패해도 수동 업로드로 백업
-      - name: Upload ZAP reports (manual fallback)
-        if: always()
+      # 리포트 아티팩트로 보관
+      - name: Upload ZAP reports
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: zapscan_files
+          name: zapscan-reports
           path: |
-            report_html.html
-            report_md.md
             report_json.json
-          retention-days: 7
+            report_md.md
+            report_html.html
+          retention-days: 14
