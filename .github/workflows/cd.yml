@@ -52,8 +52,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      id-token: write            # cosign keyless 서명용
-      security-events: write     # Trivy SARIF 업로드용
+      id-token: write
+      security-events: write
     env:
       IMG: ${{ secrets.DOCKERHUB_USERNAME }}/myflask@${{ needs.build-and-push.outputs.image-digest }}
 
@@ -69,14 +69,33 @@ jobs:
           ignore-unfixed: true
           format: sarif
           output: trivy-image.sarif
-          exit-code: '1'   # ← 게이트
+          exit-code: '1'
           scanners: 'vuln'
 
       - name: Upload Trivy SARIF
-        if: always()             # ← 실패해도 업로드
+        if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-image.sarif
+
+      # ← 여기부터가 들여쓰기 깨져 있었음 (고쳐서 제공)
+      - name: Trivy JSON (for SeveritySource)
+        if: always()
+        run: |
+          trivy image --scanners vuln \
+            --vuln-type os,library \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --detection-priority precise \
+            -f json -o trivy-image.json "${IMG}" || true
+
+      - name: Upload Trivy JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-json
+          path: trivy-image.json
+          retention-days: 7
 
       - name: SBOM (SPDX)
         uses: anchore/sbom-action@v0
@@ -101,6 +120,7 @@ jobs:
           name: sbom-spdx
           path: sbom.spdx.json
           retention-days: 30
+
 
 ###############################################################################
 # 2) Deploy to GCE VM
