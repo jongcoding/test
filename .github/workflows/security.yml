@@ -12,6 +12,7 @@ concurrency:
 jobs:
   security:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: read
       security-events: write     # SARIF 업로드
@@ -60,11 +61,19 @@ jobs:
           results=$(jq '[.runs[].results] | flatten | length' semgrep.sarif 2>/dev/null || echo 0)
           if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
 
-      - name: Upload Semgrep SARIF
+      - name: Upload Semgrep SARIF (Code Scanning)
         if: ${{ steps.semgrep_sarif_check.outputs.ok == 'true' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: semgrep.sarif
+
+      - name: Keep Semgrep SARIF as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif
+          path: semgrep.sarif
+          retention-days: 7
 
       # ──────────────────────────────
       # Bandit (Python SAST)
@@ -84,11 +93,19 @@ jobs:
           results=$(jq '[.runs[].results] | flatten | length' bandit.sarif 2>/dev/null || echo 0)
           if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
 
-      - name: Upload Bandit SARIF
+      - name: Upload Bandit SARIF (Code Scanning)
         if: ${{ steps.bandit_sarif_check.outputs.ok == 'true' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: bandit.sarif
+
+      - name: Keep Bandit SARIF as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-sarif
+          path: bandit.sarif
+          retention-days: 7
 
       # ──────────────────────────────
       # pip-audit (deps CVE) – 리포트 모드
@@ -141,6 +158,18 @@ jobs:
             hadolint --format sarif "${files[@]}" > hadolint.sarif || true
           test -s hadolint.sarif || echo '{"version":"2.1.0","runs":[]}' > hadolint.sarif
 
+      - name: Hadolint summary to log
+        if: ${{ steps.df.outputs.found == 'true' }}
+        run: |
+          echo "== hadolint.sarif =="
+          if [ -s hadolint.sarif ]; then
+            runs=$(jq '.runs | length' hadolint.sarif 2>/dev/null || echo 0)
+            results=$(jq '[.runs[].results] | flatten | length' hadolint.sarif 2>/dev/null || echo 0)
+            echo "runs=${runs} results=${results}"
+          else
+            echo "hadolint.sarif not found or empty"
+          fi
+
       - name: Check Hadolint SARIF has results
         if: ${{ steps.df.outputs.found == 'true' }}
         id: hadolint_sarif_check
@@ -152,17 +181,27 @@ jobs:
           results=$(jq '[.runs[].results] | flatten | length' hadolint.sarif 2>/dev/null || echo 0)
           if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
 
-      - name: Upload Hadolint SARIF
+      - name: Upload Hadolint SARIF (Code Scanning)
         if: ${{ steps.df.outputs.found == 'true' && steps.hadolint_sarif_check.outputs.ok == 'true' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: hadolint.sarif
 
+      - name: Keep Hadolint SARIF as artifact
+        if: ${{ steps.df.outputs.found == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: hadolint-sarif
+          path: hadolint.sarif
+          retention-days: 7
+
       # ──────────────────────────────
       # Trivy (filesystem scan)
       # ──────────────────────────────
+      - run: echo ">>> START Trivy filesystem scan"
       - name: Trivy filesystem scan
         uses: aquasecurity/trivy-action@0.28.0
+        timeout-minutes: 20
         with:
           scan-type: fs
           ignore-unfixed: true
@@ -170,6 +209,7 @@ jobs:
           format: sarif
           output: trivy-fs.sarif
           exit-code: '0'   # 게이트로 쓰려면 '1'
+      - run: echo "<<< END Trivy filesystem scan"
 
       - name: Check Trivy SARIF has results
         id: trivyfs_sarif_check
@@ -181,11 +221,19 @@ jobs:
           results=$(jq '[.runs[].results] | flatten | length' trivy-fs.sarif 2>/dev/null || echo 0)
           if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
 
-      - name: Upload Trivy SARIF
+      - name: Upload Trivy SARIF (Code Scanning)
         if: ${{ steps.trivyfs_sarif_check.outputs.ok == 'true' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: trivy-fs.sarif
+
+      - name: Keep Trivy SARIF as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-fs-sarif
+          path: trivy-fs.sarif
+          retention-days: 7
 
       # ──────────────────────────────
       # Gitleaks (Secrets) — v2: env로 설정 + GITHUB_TOKEN 필요
@@ -194,7 +242,8 @@ jobs:
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # GITLEAKS_CONFIG: .gitleaks.toml
+          # 아래 옵션 원하면 주석 해제
           # GITLEAKS_ENABLE_COMMENTS: "true"
           # GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "true"
           # GITLEAKS_ENABLE_SUMMARY: "true"
+          # GITLEAKS_CONFIG: .gitleaks.toml
