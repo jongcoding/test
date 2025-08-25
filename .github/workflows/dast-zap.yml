@@ -10,9 +10,10 @@ on:
 jobs:
   zap_scan:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
-      actions: write   # 수동 업로드 문제 없게 여유로 부여
+      actions: write     # 아티팩트 업로드 여유 권한
 
     env:
       TARGET: https://${{ secrets.DOMAIN }}
@@ -28,28 +29,36 @@ jobs:
           set -euo pipefail
           mkdir -p .zap
           : > .zap/rules.tsv
-          printf '10015\tWARN\tCache-Control tune when behind CDN\n' >> .zap/rules.tsv
-          printf '10021\tWARN\tAdd X-Content-Type-Options nosniff\n' >> .zap/rules.tsv
-          printf '10035\tWARN\tEnable HSTS after HTTPS stable\n' >> .zap/rules.tsv
-          printf '10036\tWARN\tHide Server header via nginx\n' >> .zap/rules.tsv
-          printf '10038\tWARN\tBaseline CSP then tighten\n' >> .zap/rules.tsv
-          printf '10049\tWARN\tTune cacheability by route\n' >> .zap/rules.tsv
-          printf '10063\tWARN\tAdd Permissions-Policy\n' >> .zap/rules.tsv
-          printf '90004\tWARN\tSpectre isolation (COOP/COEP)\n' >> .zap/rules.tsv
-          printf '90005\tIGNORE\tSec-Fetch-* are request headers (browser only)\n' >> .zap/rules.tsv
+          printf '10015\tWARN\tCache-Control tune when behind CDN\n'     >> .zap/rules.tsv
+          printf '10021\tWARN\tAdd X-Content-Type-Options nosniff\n'     >> .zap/rules.tsv
+          printf '10035\tWARN\tEnable HSTS after HTTPS stable\n'          >> .zap/rules.tsv
+          printf '10036\tWARN\tHide Server header via nginx\n'            >> .zap/rules.tsv
+          printf '10038\tWARN\tBaseline CSP then tighten\n'               >> .zap/rules.tsv
+          printf '10049\tWARN\tTune cacheability by route\n'              >> .zap/rules.tsv
+          printf '10063\tWARN\tAdd Permissions-Policy\n'                  >> .zap/rules.tsv
+          printf '90004\tWARN\tSpectre isolation (COOP/COEP)\n'           >> .zap/rules.tsv
+          printf '90005\tIGNORE\tSec-Fetch-* are request headers\n'       >> .zap/rules.tsv
           echo "---- .zap/rules.tsv (tabs shown as ^I) ----"
           cat -v .zap/rules.tsv
 
-      # 컨테이너가 /zap/wrk에 쓰도록 퍼미션 완화
+      # 리포트 파일 미리 생성(요약/업로드 스텝이 파일 유무로 멈추지 않게)
+      - name: Create empty report files
+        run: |
+          : > report_json.json
+          : > report_md.md
+          : > report_html.html
+
+      # 컨테이너가 /zap/wrk 에 쓰도록 퍼미션 완화
       - name: Loosen workspace perms
         run: sudo chmod -R a+rwX .
 
-      # ZAP 컨테이너 직접 실행 (Baseline)
-      - name: Run ZAP Baseline (docker)
+      # ZAP 컨테이너 직접 실행(Baseline). rc=2(WARN) 는 성공으로 처리.
+      - name: Run ZAP Baseline (docker; treat WARN as success)
         shell: bash
         run: |
           set -euo pipefail
           docker pull ghcr.io/zaproxy/zaproxy:stable
+          set +e
           docker run --rm --network=host \
             -v "$PWD":/zap/wrk \
             -e ZAP_AUTH_HEADER="${{ secrets.ZAP_AUTH_HEADER }}" \
@@ -63,15 +72,32 @@ jobs:
               -J report_json.json \
               -w report_md.md \
               -r report_html.html
+          rc=$?
+          echo "ZAP exit code: $rc"
+          # 0: OK, 1: FAIL 존재 → 실패, 2: WARN 존재 → 성공으로 계속, 3+: 실행 오류
+          if [ "$rc" -eq 1 ]; then
+            echo "ZAP found FAIL alerts -> failing job"
+            exit 1
+          elif [ "$rc" -eq 2 ]; then
+            echo "ZAP found only WARN alerts -> continuing as success"
+            exit 0
+          elif [ "$rc" -eq 0 ]; then
+            echo " ZAP found no FAIL/WARN -> success"
+            exit 0
+          else
+            echo "ZAP run error (rc=$rc)"
+            exit $rc
+          fi
 
-      # GitHub Job Summary 에 MD 요약 붙이기 (보기 편하게)
+      # Job Summary 에 MD 리포트 붙이기
       - name: Append summary
         if: always()
         run: |
-          echo "## ZAP Baseline Report" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          sed -e 's/\r$//' report_md.md >> $GITHUB_STEP_SUMMARY || true
+          echo "## ZAP Baseline Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          sed -e 's/\r$//' report_md.md >> "$GITHUB_STEP_SUMMARY" || true
 
+      # 결과물 업로드(HTML/JSON/MD)
       - name: Upload ZAP reports
         if: always()
         uses: actions/upload-artifact@v4
