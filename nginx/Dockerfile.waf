@@ -13,22 +13,34 @@ RUN apt-get update && \
       gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
-# 모듈 중복 로드 방지: 패키지 제공 conf가 있으면 그걸 enable, 없으면 우리가 1회만 load_module 생성
+# ─────────────────────────────────────────────────────────────────────────────
+# ① ModSecurity 모듈 로더 '중복 방지'
+#   - modules-enabled 내의 기존 로더 파일을 모두 제거
+#   - 패키지 제공 conf가 있으면 그걸 enable, 없으면 우리 파일로 1회만 load_module
+# ─────────────────────────────────────────────────────────────────────────────
 RUN set -eux; \
     mkdir -p /etc/nginx/modules-enabled /etc/nginx/modules-available; \
+    # 기존 modsecurity 로더 전부 제거 (중복 방지)
+    for f in $(grep -Rl 'ngx_http_modsecurity_module.so' /etc/nginx/modules-enabled || true); do \
+      rm -f "$f"; \
+    done; \
     if [ -f /etc/nginx/modules-available/mod-http-modsecurity.conf ]; then \
       ln -sf /etc/nginx/modules-available/mod-http-modsecurity.conf \
              /etc/nginx/modules-enabled/50-mod-http-modsecurity.conf; \
-    elif [ ! -f /etc/nginx/modules-enabled/50-modsecurity.conf ]; then \
+    else \
       printf 'load_module /usr/lib/nginx/modules/ngx_http_modsecurity_module.so;\n' \
-        > /etc/nginx/modules-enabled/50-modsecurity.conf; \
+        > /etc/nginx/modules-enabled/50-mod-http-modsecurity.conf; \
     fi
 
-# ModSecurity + CRS 설정 (여러 배포 경로/압축형 대응 + 최후엔 GitHub에서 확보)
+# ─────────────────────────────────────────────────────────────────────────────
+# ② ModSecurity + CRS 설정
+#    - modsecurity.conf: 패키지/도큐/원격 순으로 확보, 실패 시 최소 구성 생성
+#    - CRS: 패키지/시스템에서 찾기 → 없으면 GitHub에서 v4.5.0 내려받아 전개
+#    - nginx include용 main.conf 생성
+# ─────────────────────────────────────────────────────────────────────────────
 RUN set -eux; \
     mkdir -p /etc/modsecurity /var/log/modsecurity /etc/nginx/modsec /etc/nginx/templates; \
-    \
-    # 1) modsecurity.conf 확보 (패키지 경로 → 도큐 예제 → 원격 → 최소)
+    # modsecurity.conf 확보
     if [ -f /etc/modsecurity/modsecurity.conf-recommended ]; then \
       cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf; \
     elif [ -f /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended.gz ]; then \
@@ -52,25 +64,21 @@ RUN set -eux; \
           > /etc/modsecurity/modsecurity.conf; \
       }; \
     fi; \
-    # 기본 권장값 보정
+    # 권장값 보정
     sed -ri 's/SecRuleEngine\s+DetectionOnly/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf || true; \
     sed -ri 's|^SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|' /etc/modsecurity/modsecurity.conf || true; \
     touch /var/log/modsecurity/audit.log && chown -R www-data:www-data /var/log/modsecurity; \
     \
-    # 2) CRS 디렉터리/파일 확보
+    # CRS 확보 (패키지/시스템 → GitHub v4.5.0)
     CRS_DIR="/usr/share/modsecurity-crs"; \
     mkdir -p "$CRS_DIR"; \
-    # (1) 시스템 내에서 crs-setup.conf.example 찾아보기
     CAND="$(find "$CRS_DIR" /usr/share -maxdepth 6 -type f -name 'crs-setup.conf.example*' | head -n1 || true)"; \
     if [ -z "$CAND" ]; then \
-      # (2) 없으면 GitHub 릴리즈에서 직접 전개 (타겟 디렉터리로 바로 펼치기)
       ver="v4.5.0"; \
       curl -fsSL "https://github.com/coreruleset/coreruleset/archive/refs/tags/${ver}.tar.gz" \
         | tar -xz -C "$CRS_DIR" --strip-components=1; \
-      # 다시 탐색
       CAND="$(find "$CRS_DIR" -maxdepth 2 -type f -name 'crs-setup.conf.example*' | head -n1 || true)"; \
     fi; \
-    # (3) 예제 파일을 crs-setup.conf로 복사 (gz면 풀어서)
     if [ -n "$CAND" ]; then \
       case "$CAND" in \
         *.gz) zcat "$CAND" > "$CRS_DIR/crs-setup.conf" ;; \
@@ -81,7 +89,7 @@ RUN set -eux; \
       printf '# CRS setup placeholder\n' > "$CRS_DIR/crs-setup.conf"; \
     fi; \
     \
-    # 3) nginx에서 include할 메인 규칙 집합
+    # nginx include용 메인 규칙 묶음
     printf '%s\n' \
       'Include "/etc/modsecurity/modsecurity.conf"' \
       'Include "/usr/share/modsecurity-crs/crs-setup.conf"' \
