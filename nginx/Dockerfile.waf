@@ -1,15 +1,34 @@
-FROM nginx:1.25-bookworm
+# Debian nginx + ModSecurity + CRS (ABI 일치)
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      libmodsecurity3 libnginx-mod-http-modsecurity modsecurity-crs && \
-    rm -rf /var/lib/apt/lists/*
+      ca-certificates curl \
+      nginx-full \
+      modsecurity modsecurity-crs \
+      libnginx-mod-http-modsecurity \
+    && rm -rf /var/lib/apt/lists/*
 
-# ModSecurity 기본 설정
-RUN cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf && \
-    sed -i 's/SecRuleEngine .*/SecRuleEngine DetectionOnly/' /etc/modsecurity/modsecurity.conf && \
-    sed -i 's|SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|' /etc/modsecurity/modsecurity.conf
+# 모듈 로드(동적) - Debian 패키지 경로에 맞춤
+RUN mkdir -p /etc/nginx/modules-enabled && \
+    printf 'load_module modules/ngx_http_modsecurity_module.so;\n' \
+      > /etc/nginx/modules-enabled/50-modsecurity.conf
 
-# 우리 메인 규칙(OWASP CRS 포함) 로더
-RUN mkdir -p /etc/nginx/modsec
-COPY modsec/main.conf /etc/nginx/modsec/main.conf
+# ModSecurity 기본 설정 적용(DetectionOnly -> On, 로그 경로 등)
+RUN set -eux; \
+    mkdir -p /etc/modsecurity /var/log/modsecurity /etc/nginx/modsec /etc/nginx/templates; \
+    cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf; \
+    sed -ri "s/SecRuleEngine\s+DetectionOnly/SecRuleEngine On/" /etc/modsecurity/modsecurity.conf; \
+    sed -ri "s|^SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|" /etc/modsecurity/modsecurity.conf; \
+    # CRS 활성화
+    cp /usr/share/modsecurity-crs/crs-setup.conf.example /usr/share/modsecurity-crs/crs-setup.conf; \
+    printf '%s\n' \
+      'Include "/etc/modsecurity/modsecurity.conf"' \
+      'Include "/usr/share/modsecurity-crs/crs-setup.conf"' \
+      'Include "/usr/share/modsecurity-crs/rules/*.conf"' \
+      > /etc/nginx/modsec/main.conf
+
+# nginx가 포그라운드로 뜰 수 있게(Compose에서 entrypoint로 실행)
+EXPOSE 80 443
