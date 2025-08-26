@@ -13,17 +13,14 @@ RUN apt-get update && \
       gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
-# ─────────────────────────────────────────────────────────────────────────────
 # ① ModSecurity 모듈 로더 '중복 방지'
-#   - modules-enabled 내의 기존 로더 파일을 모두 제거
-#   - 패키지 제공 conf가 있으면 그걸 enable, 없으면 우리 파일로 1회만 load_module
-# ─────────────────────────────────────────────────────────────────────────────
 RUN set -eux; \
     mkdir -p /etc/nginx/modules-enabled /etc/nginx/modules-available; \
-    # 기존 modsecurity 로더 전부 제거 (중복 방지)
-    for f in $(grep -Rl 'ngx_http_modsecurity_module.so' /etc/nginx/modules-enabled || true); do \
+    # 기존에 modsecurity 모듈을 load하는 파일이 있으면 모두 제거
+    for f in $(grep -Rl 'ngx_http_modsecurity_module\.so' /etc/nginx/modules-enabled || true); do \
       rm -f "$f"; \
     done; \
+    # 패키지에서 제공되면 그걸 enable, 없으면 우리 로더 생성
     if [ -f /etc/nginx/modules-available/mod-http-modsecurity.conf ]; then \
       ln -sf /etc/nginx/modules-available/mod-http-modsecurity.conf \
              /etc/nginx/modules-enabled/50-mod-http-modsecurity.conf; \
@@ -32,15 +29,11 @@ RUN set -eux; \
         > /etc/nginx/modules-enabled/50-mod-http-modsecurity.conf; \
     fi
 
-# ─────────────────────────────────────────────────────────────────────────────
-# ② ModSecurity + CRS 설정
-#    - modsecurity.conf: 패키지/도큐/원격 순으로 확보, 실패 시 최소 구성 생성
-#    - CRS: 패키지/시스템에서 찾기 → 없으면 GitHub에서 v4.5.0 내려받아 전개
-#    - nginx include용 main.conf 생성
-# ─────────────────────────────────────────────────────────────────────────────
+# ② ModSecurity + CRS 설정 (+ unicode.mapping 절대경로 지정)
 RUN set -eux; \
     mkdir -p /etc/modsecurity /var/log/modsecurity /etc/nginx/modsec /etc/nginx/templates; \
-    # modsecurity.conf 확보
+    \
+    # -- modsecurity.conf 확보 (패키지 → 도큐 예제 → 원격 → 최소)
     if [ -f /etc/modsecurity/modsecurity.conf-recommended ]; then \
       cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf; \
     elif [ -f /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended.gz ]; then \
@@ -69,7 +62,33 @@ RUN set -eux; \
     sed -ri 's|^SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|' /etc/modsecurity/modsecurity.conf || true; \
     touch /var/log/modsecurity/audit.log && chown -R www-data:www-data /var/log/modsecurity; \
     \
-    # CRS 확보 (패키지/시스템 → GitHub v4.5.0)
+    # -- unicode.mapping 확보 후 절대경로로 지정
+    if [ ! -s /etc/modsecurity/unicode.mapping ]; then \
+      CAND=""; \
+      for p in \
+        /etc/modsecurity/unicode.mapping \
+        /usr/share/modsecurity/unicode.mapping \
+        /usr/share/doc/libmodsecurity3/examples/unicode.mapping.gz \
+      ; do \
+        if [ -e "$p" ]; then CAND="$p"; break; fi; \
+      done; \
+      if [ -n "$CAND" ]; then \
+        case "$CAND" in \
+          *.gz) zcat "$CAND" > /etc/modsecurity/unicode.mapping ;; \
+          *)    cp "$CAND" /etc/modsecurity/unicode.mapping ;; \
+        esac; \
+      else \
+        curl -fsSL https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/unicode.mapping \
+          -o /etc/modsecurity/unicode.mapping; \
+      fi; \
+    fi; \
+    if grep -qi '^\s*SecUnicodeMapFile' /etc/modsecurity/modsecurity.conf; then \
+      sed -ri 's|^\s*SecUnicodeMapFile\b.*|SecUnicodeMapFile /etc/modsecurity/unicode.mapping|' /etc/modsecurity/modsecurity.conf; \
+    else \
+      printf '\nSecUnicodeMapFile /etc/modsecurity/unicode.mapping\n' >> /etc/modsecurity/modsecurity.conf; \
+    fi; \
+    \
+    # -- CRS 확보 (패키지/시스템 → GitHub v4.5.0)
     CRS_DIR="/usr/share/modsecurity-crs"; \
     mkdir -p "$CRS_DIR"; \
     CAND="$(find "$CRS_DIR" /usr/share -maxdepth 6 -type f -name 'crs-setup.conf.example*' | head -n1 || true)"; \
@@ -89,7 +108,7 @@ RUN set -eux; \
       printf '# CRS setup placeholder\n' > "$CRS_DIR/crs-setup.conf"; \
     fi; \
     \
-    # nginx include용 메인 규칙 묶음
+    # nginx에서 include할 메인 규칙 묶음
     printf '%s\n' \
       'Include "/etc/modsecurity/modsecurity.conf"' \
       'Include "/usr/share/modsecurity-crs/crs-setup.conf"' \
