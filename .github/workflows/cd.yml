@@ -196,15 +196,13 @@ jobs:
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/"
 
       # ── 2-b. Nginx WAF build context 업로드 (Dockerfile.waf, modsec 등) ──
-      - name: Upload nginx WAF build context
+      - name: Upload nginx WAF build context (no rsync; tar over SSH)
         run: |
-          if command -v rsync >/dev/null 2>&1; then
-            rsync -avz --delete nginx/ ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/nginx/"
-          else
-            ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "mkdir -p '${{ env.REMOTE_DIR }}/nginx'"
-            scp -o StrictHostKeyChecking=no -r nginx/* \
-              ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/nginx/"
-          fi
+          set -euo pipefail
+          tar -C nginx -czf - . \
+            | ssh -o StrictHostKeyChecking=no ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} \
+              "mkdir -p '${{ env.REMOTE_DIR }}/nginx' && tar -xzf - -C '${{ env.REMOTE_DIR }}/nginx'"
+
 
       # ── 3. HTTP-only 스택 기동 (nginx 먼저 빌드) ─────────────────────────
       - name: Start HTTP-only stack (build nginx)
