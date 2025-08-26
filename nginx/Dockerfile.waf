@@ -9,6 +9,7 @@ RUN apt-get update && \
       libmodsecurity3 \
       libnginx-mod-http-modsecurity \
       modsecurity-crs \
+      gettext-base \
     && rm -rf /var/lib/apt/lists/*
 
 # NGINX 모듈 로드
