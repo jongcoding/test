@@ -1,0 +1,15 @@
+FROM nginx:1.25-bookworm
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+      libmodsecurity3 libnginx-mod-http-modsecurity modsecurity-crs && \
+    rm -rf /var/lib/apt/lists/*
+
+# ModSecurity 기본 설정
+RUN cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf && \
+    sed -i 's/SecRuleEngine .*/SecRuleEngine DetectionOnly/' /etc/modsecurity/modsecurity.conf && \
+    sed -i 's|SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|' /etc/modsecurity/modsecurity.conf
+
+# 우리 메인 규칙(OWASP CRS 포함) 로더
+RUN mkdir -p /etc/nginx/modsec
+COPY modsec/main.conf /etc/nginx/modsec/main.conf
