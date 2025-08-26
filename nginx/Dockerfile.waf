@@ -1,8 +1,7 @@
-# nginx + ModSecurity v3 + CRS
 FROM debian:bookworm-slim
-
 ENV DEBIAN_FRONTEND=noninteractive
 
+# NGINX + ModSecurity v3 + CRS 설치
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl \
@@ -12,14 +11,15 @@ RUN apt-get update && \
       modsecurity-crs \
     && rm -rf /var/lib/apt/lists/*
 
-# nginx에 모듈 로드
+# NGINX에 모듈 로드
 RUN mkdir -p /etc/nginx/modules-enabled && \
     printf 'load_module /usr/lib/nginx/modules/ngx_http_modsecurity_module.so;\n' \
       > /etc/nginx/modules-enabled/50-modsecurity.conf
 
-# ModSecurity + CRS 설정 (여러 경로/방식으로 확보 → 실패 시 최소 설정 생성)
+# ModSecurity & CRS 설정 (여러 경로 fallbacks + 최후엔 원격 다운로드)
 RUN set -eux; \
     mkdir -p /etc/modsecurity /var/log/modsecurity /etc/nginx/modsec /etc/nginx/templates; \
+    # 1) modsecurity.conf 확보
     if [ -f /etc/modsecurity/modsecurity.conf-recommended ]; then \
       cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf; \
     elif [ -f /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended.gz ]; then \
@@ -27,11 +27,9 @@ RUN set -eux; \
     elif [ -f /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended ]; then \
       cp /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf; \
     else \
-      curl -fsSL \
-        https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/modsecurity.conf-recommended \
-        -o /etc/modsecurity/modsecurity.conf \
-      || { \
-        echo "추천 설정 원격 다운로드 실패 → 최소 설정 생성"; \
+      curl -fsSL https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/modsecurity.conf-recommended \
+        -o /etc/modsecurity/modsecurity.conf || { \
+        echo "modsecurity.conf 확보 실패 → 최소 설정으로 생성"; \
         printf '%s\n' \
           'SecRuleEngine On' \
           'SecRequestBodyAccess On' \
@@ -45,12 +43,32 @@ RUN set -eux; \
           > /etc/modsecurity/modsecurity.conf; \
       }; \
     fi; \
-    # 기본 권장값 수정(탐지모드→차단모드, 로그 경로)
     sed -ri 's/SecRuleEngine\s+DetectionOnly/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf || true; \
     sed -ri 's|^SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|' /etc/modsecurity/modsecurity.conf || true; \
     touch /var/log/modsecurity/audit.log && chown -R www-data:www-data /var/log/modsecurity; \
-    # CRS 연결
-    cp /usr/share/modsecurity-crs/crs-setup.conf.example /usr/share/modsecurity-crs/crs-setup.conf; \
+    # 2) CRS 디렉터리/파일 확보 (경로가 배포판마다 다름)
+    CRS_DIR="/usr/share/modsecurity-crs"; \
+    mkdir -p "$CRS_DIR"; \
+    if [ -f "$CRS_DIR/crs-setup.conf.example" ] || [ -f "$CRS_DIR/crs-setup.conf" ]; then \
+      : "OK - CRS 예제가 표준 경로에 있음"; \
+    else \
+      # /usr/share/doc 쪽에 예제가 있는 경우
+      CAND=$(find /usr/share -maxdepth 6 -type f -name 'crs-setup.conf.example*' | head -n1 || true); \
+      if [ -n "$CAND" ]; then \
+        case "$CAND" in \
+          *.gz) zcat "$CAND" > "$CRS_DIR/crs-setup.conf" ;; \
+          *)    cp "$CAND" "$CRS_DIR/crs-setup.conf" ;; \
+        esac; \
+      else \
+        # 최후: GitHub에서 CRS 내려받아 전개
+        ver="v4.5.0"; \
+        curl -fsSL "https://github.com/coreruleset/coreruleset/archive/refs/tags/${ver}.tar.gz" \
+          | tar -xz -C /usr/share; \
+        mv "/usr/share/coreruleset-${ver#v}" "$CRS_DIR"; \
+        cp "$CRS_DIR/crs-setup.conf.example" "$CRS_DIR/crs-setup.conf"; \
+      fi; \
+    fi; \
+    # nginx에서 include할 메인 규칙 집합
     printf '%s\n' \
       'Include "/etc/modsecurity/modsecurity.conf"' \
       'Include "/usr/share/modsecurity-crs/crs-setup.conf"' \
