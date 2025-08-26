@@ -1,7 +1,7 @@
 FROM debian:bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 
-# NGINX + ModSecurity v3 + CRS 설치
+# NGINX + ModSecurity v3 + (배포판 패키지의 CRS도 함께) 설치
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl \
@@ -11,12 +11,12 @@ RUN apt-get update && \
       modsecurity-crs \
     && rm -rf /var/lib/apt/lists/*
 
-# NGINX에 모듈 로드
+# NGINX 모듈 로드
 RUN mkdir -p /etc/nginx/modules-enabled && \
     printf 'load_module /usr/lib/nginx/modules/ngx_http_modsecurity_module.so;\n' \
       > /etc/nginx/modules-enabled/50-modsecurity.conf
 
-# ModSecurity & CRS 설정 (여러 경로 fallbacks + 최후엔 원격 다운로드)
+# ModSecurity + CRS 설정 (경로 변화·압축유형 모두 대응)
 RUN set -eux; \
     mkdir -p /etc/modsecurity /var/log/modsecurity /etc/nginx/modsec /etc/nginx/templates; \
     # 1) modsecurity.conf 확보
@@ -29,7 +29,7 @@ RUN set -eux; \
     else \
       curl -fsSL https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/modsecurity.conf-recommended \
         -o /etc/modsecurity/modsecurity.conf || { \
-        echo "modsecurity.conf 확보 실패 → 최소 설정으로 생성"; \
+        echo "modsecurity.conf 원격 확보 실패 → 최소 구성으로 생성"; \
         printf '%s\n' \
           'SecRuleEngine On' \
           'SecRequestBodyAccess On' \
@@ -46,29 +46,32 @@ RUN set -eux; \
     sed -ri 's/SecRuleEngine\s+DetectionOnly/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf || true; \
     sed -ri 's|^SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|' /etc/modsecurity/modsecurity.conf || true; \
     touch /var/log/modsecurity/audit.log && chown -R www-data:www-data /var/log/modsecurity; \
-    # 2) CRS 디렉터리/파일 확보 (경로가 배포판마다 다름)
+    \
+    # 2) CRS 디렉터리 준비 (패키지든, GitHub든 어디서든 확보)
     CRS_DIR="/usr/share/modsecurity-crs"; \
     mkdir -p "$CRS_DIR"; \
-    if [ -f "$CRS_DIR/crs-setup.conf.example" ] || [ -f "$CRS_DIR/crs-setup.conf" ]; then \
-      : "OK - CRS 예제가 표준 경로에 있음"; \
-    else \
-      # /usr/share/doc 쪽에 예제가 있는 경우
-      CAND=$(find /usr/share -maxdepth 6 -type f -name 'crs-setup.conf.example*' | head -n1 || true); \
-      if [ -n "$CAND" ]; then \
-        case "$CAND" in \
-          *.gz) zcat "$CAND" > "$CRS_DIR/crs-setup.conf" ;; \
-          *)    cp "$CAND" "$CRS_DIR/crs-setup.conf" ;; \
-        esac; \
-      else \
-        # 최후: GitHub에서 CRS 내려받아 전개
-        ver="v4.5.0"; \
-        curl -fsSL "https://github.com/coreruleset/coreruleset/archive/refs/tags/${ver}.tar.gz" \
-          | tar -xz -C /usr/share; \
-        mv "/usr/share/coreruleset-${ver#v}" "$CRS_DIR"; \
-        cp "$CRS_DIR/crs-setup.conf.example" "$CRS_DIR/crs-setup.conf"; \
-      fi; \
+    # (1) 패키지로 이미 깔렸는지 확인
+    CAND="$(find "$CRS_DIR" /usr/share -maxdepth 6 -type f -name 'crs-setup.conf.example*' | head -n1 || true)"; \
+    if [ -z "$CAND" ]; then \
+      # (2) 패키지에 없으면 GitHub에서 원하는 버전 직접 전개 (최신 v4 예시)
+      ver="v4.5.0"; \
+      curl -fsSL "https://github.com/coreruleset/coreruleset/archive/refs/tags/${ver}.tar.gz" \
+        | tar -xz -C "$CRS_DIR" --strip-components=1; \
+      # 다시 탐색
+      CAND="$(find "$CRS_DIR" -maxdepth 2 -type f -name 'crs-setup.conf.example*' | head -n1 || true)"; \
     fi; \
-    # nginx에서 include할 메인 규칙 집합
+    # (3) 예제 파일을 crs-setup.conf로 복사 (gz면 풀어서)
+    if [ -n "$CAND" ]; then \
+      case "$CAND" in \
+        *.gz) zcat "$CAND" > "$CRS_DIR/crs-setup.conf" ;; \
+        *)    cp "$CAND" "$CRS_DIR/crs-setup.conf" ;; \
+      esac; \
+    else \
+      echo "경고: crs-setup.conf.example을 찾지 못해 빈 설정 생성"; \
+      printf '# CRS setup placeholder\n' > "$CRS_DIR/crs-setup.conf"; \
+    fi; \
+    \
+    # 3) nginx에서 include할 메인 규칙 집합
     printf '%s\n' \
       'Include "/etc/modsecurity/modsecurity.conf"' \
       'Include "/usr/share/modsecurity-crs/crs-setup.conf"' \
