@@ -179,13 +179,41 @@ jobs:
             set -euo pipefail
             mkdir -p "${{ env.REMOTE_DIR }}"/{nginx,certbot/{config,www,logs}}
             mkdir -p "${{ env.REMOTE_DIR }}"/nginx/{modsec,logs,modsec-logs}
+
+            # --- Splunk HEC env defaults (빈 값이면 기본 세팅) ---
+            HEC_URL="${{ secrets.SPLUNK_HEC_URL }}"
+            [ -z "$HEC_URL" ] && HEC_URL="https://127.0.0.1:8088"   # 역SSH 터널 종단
+
+            HEC_TOKEN="${{ secrets.SPLUNK_HEC_TOKEN }}"
+            [ -z "$HEC_TOKEN" ] && echo "ERROR: SPLUNK_HEC_TOKEN secret is required" >&2 && exit 1
+
+            HEC_INDEX="${{ secrets.SPLUNK_HEC_INDEX }}"
+            [ -z "$HEC_INDEX" ] && HEC_INDEX="waf"
+
+            HEC_ST="${{ secrets.SPLUNK_HEC_SOURCETYPE }}"
+            [ -z "$HEC_ST" ] && HEC_ST="waf"
+
+            HEC_SRC="${{ secrets.SPLUNK_HEC_SOURCE }}"
+            [ -z "$HEC_SRC" ] && HEC_SRC="http:GCE_WAF"
+
+            HEC_INSEC="${{ secrets.SPLUNK_HEC_INSECURE }}"
+            [ -z "$HEC_INSEC" ] && HEC_INSEC="true"                 # 신뢰된 인증서면 false
+
             cat > "${{ env.REMOTE_DIR }}/.env" <<EOT
             DOMAIN=${{ env.DOMAIN }}
             LETSENCRYPT_EMAIL=${{ env.LETSENCRYPT_EMAIL }}
             IMAGE_REF=${{ env.IMG }}
-            DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+
+            # Splunk HEC
+            SPLUNK_HEC_URL=${HEC_URL}
+            SPLUNK_HEC_TOKEN=${HEC_TOKEN}
+            SPLUNK_HEC_INDEX=${HEC_INDEX}
+            SPLUNK_HEC_SOURCETYPE=${HEC_ST}
+            SPLUNK_HEC_SOURCE=${HEC_SRC}
+            SPLUNK_HEC_INSECURE=${HEC_INSEC}
             EOT
           EOF
+
 
       # ── 2-a. Compose & 템플릿 업로드 ────────────────────────────────────
       - name: Upload HTTP-only Nginx template and compose

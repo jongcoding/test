@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   web:
     image: ${IMAGE_REF}
@@ -19,18 +21,68 @@ services:
       - "443:443"
     environment:
       DOMAIN: ${DOMAIN}
+      # ↓ CD에서 주입 (예: GitHub Actions Secrets → ENV)
+      SPLUNK_HEC_URL: ${SPLUNK_HEC_URL}          # 예: https://127.0.0.1:8088
+      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN}      # HEC 토큰
+      SPLUNK_HEC_INDEX: ${SPLUNK_HEC_INDEX:-waf} # 기본 waf
+      SPLUNK_HEC_SOURCETYPE: ${SPLUNK_HEC_SOURCETYPE:-waf}
+      SPLUNK_HEC_SOURCE: ${SPLUNK_HEC_SOURCE:-http:GCE_WAF}
+      SPLUNK_HEC_INSECURE: ${SPLUNK_HEC_INSECURE:-true} # 자체서명 테스트시 true
     volumes:
       - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./certbot/config:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
-      - ./nginx/logs:/var/log/nginx
-      - ./nginx/modsec-logs:/var/log/modsecurity
+      # stdout/stderr 로 전송하므로 파일 로그 볼륨은 선택사항
+      # - ./nginx/logs:/var/log/nginx
+      # - ./nginx/modsec-logs:/var/log/modsecurity
     entrypoint:
       - sh
       - -exc
       - |
+        # 1) 템플릿 → 실제 conf 생성
         envsubst '$DOMAIN' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
+
+        # 2) (안전장치) WAF 룰 묶음이 CRS 포함 메인으로 가리키도록 강제 교체
+        #    기존에 modsecurity_rules_file 이 있으면 main.conf 로 바꾸고, 없으면 server 블록 끝에 추가
+        if grep -q 'modsecurity_rules_file' /etc/nginx/conf.d/default.conf; then
+          sed -ri 's|^\s*modsecurity_rules_file\s+.*|    modsecurity_rules_file /etc/nginx/modsec/main.conf;|' /etc/nginx/conf.d/default.conf
+        else
+          # HTTPS 서버 블록 안에 삽입 (server { ... } 마지막 닫기 전에)
+          awk '
+            BEGIN{inhttps=0}
+            /server\s*\{/ {block++}
+            block==2 && /server_name/ {inhttps=1}
+            {print}
+            inhttps && /^\s*\}/ {
+              print "    modsecurity_rules_file /etc/nginx/modsec/main.conf;";
+              inhttps=0
+            }
+          ' /etc/nginx/conf.d/default.conf > /etc/nginx/conf.d/default.conf.tmp && mv /etc/nginx/conf.d/default.conf.tmp /etc/nginx/conf.d/default.conf
+        fi
+
+        # 3) (권장) 443 서버 블록에도 stdout/stderr 로깅 보장
+        if ! grep -q 'access_log /dev/stdout' /etc/nginx/conf.d/default.conf; then
+          sed -ri '/server\s*\{/,/^\s*\}/{/server_name\s+\$DOMAIN;/{a\    access_log /dev/stdout  combined;\n    error_log  /dev/stderr  warn;}}' /etc/nginx/conf.d/default.conf
+        fi
+
+        # 4) ModSecurity 감사로그를 stderr 로 강제 (Splunk 드라이버가 수집)
+        sed -ri 's|^\s*SecAuditLog\s+.*|SecAuditLog /dev/stderr|' /etc/modsecurity/modsecurity.conf
+        # DetectionOnly → On 보정
+        sed -ri 's/SecRuleEngine\s+DetectionOnly/SecRuleEngine On/i' /etc/modsecurity/modsecurity.conf || true
+
         exec nginx -g 'daemon off;'
+    logging:
+      driver: splunk
+      options:
+        splunk-url: ${SPLUNK_HEC_URL}
+        splunk-token: ${SPLUNK_HEC_TOKEN}
+        splunk-index: ${SPLUNK_HEC_INDEX}
+        splunk-sourcetype: ${SPLUNK_HEC_SOURCETYPE}
+        splunk-source: ${SPLUNK_HEC_SOURCE}
+        splunk-gzip: "true"
+        splunk-insecureskipverify: ${SPLUNK_HEC_INSECURE}
+        tag: "{{.Name}}"
+        labels: "com.docker.compose.project,com.docker.compose.service"
     restart: unless-stopped
 
   certbot:
