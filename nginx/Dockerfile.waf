@@ -1,9 +1,8 @@
-# nginx + ModSecurity + CRS (Debian ABI 일치)
+# nginx + ModSecurity v3 + CRS
 FROM debian:bookworm-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 핵심: modsecurity → libmodsecurity3 로, 나머지는 Debian 패키지 사용
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl \
@@ -13,18 +12,44 @@ RUN apt-get update && \
       modsecurity-crs \
     && rm -rf /var/lib/apt/lists/*
 
-# 모듈 로드 (절대경로로 안전하게)
+# nginx에 모듈 로드
 RUN mkdir -p /etc/nginx/modules-enabled && \
     printf 'load_module /usr/lib/nginx/modules/ngx_http_modsecurity_module.so;\n' \
       > /etc/nginx/modules-enabled/50-modsecurity.conf
 
-# ModSecurity 기본 설정 + CRS 포함
+# ModSecurity + CRS 설정 (여러 경로/방식으로 확보 → 실패 시 최소 설정 생성)
 RUN set -eux; \
     mkdir -p /etc/modsecurity /var/log/modsecurity /etc/nginx/modsec /etc/nginx/templates; \
-    cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf; \
-    # 필요시 우선 탐지모드로 시작하려면 On → DetectionOnly 로 바꾸세요
-    sed -ri "s/SecRuleEngine\s+DetectionOnly/SecRuleEngine On/" /etc/modsecurity/modsecurity.conf; \
-    sed -ri "s|^SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|" /etc/modsecurity/modsecurity.conf; \
+    if [ -f /etc/modsecurity/modsecurity.conf-recommended ]; then \
+      cp /etc/modsecurity/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf; \
+    elif [ -f /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended.gz ]; then \
+      zcat /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended.gz > /etc/modsecurity/modsecurity.conf; \
+    elif [ -f /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended ]; then \
+      cp /usr/share/doc/libmodsecurity3/examples/modsecurity.conf-recommended /etc/modsecurity/modsecurity.conf; \
+    else \
+      curl -fsSL \
+        https://raw.githubusercontent.com/SpiderLabs/ModSecurity/v3/master/modsecurity.conf-recommended \
+        -o /etc/modsecurity/modsecurity.conf \
+      || { \
+        echo "추천 설정 원격 다운로드 실패 → 최소 설정 생성"; \
+        printf '%s\n' \
+          'SecRuleEngine On' \
+          'SecRequestBodyAccess On' \
+          'SecResponseBodyAccess Off' \
+          'SecAuditEngine RelevantOnly' \
+          'SecAuditLog /var/log/modsecurity/audit.log' \
+          'SecAuditLogFormat JSON' \
+          'SecAuditLogParts ABIJDEFHZ' \
+          'SecTmpDir /tmp' \
+          'SecDataDir /tmp' \
+          > /etc/modsecurity/modsecurity.conf; \
+      }; \
+    fi; \
+    # 기본 권장값 수정(탐지모드→차단모드, 로그 경로)
+    sed -ri 's/SecRuleEngine\s+DetectionOnly/SecRuleEngine On/' /etc/modsecurity/modsecurity.conf || true; \
+    sed -ri 's|^SecAuditLog .*|SecAuditLog /var/log/modsecurity/audit.log|' /etc/modsecurity/modsecurity.conf || true; \
+    touch /var/log/modsecurity/audit.log && chown -R www-data:www-data /var/log/modsecurity; \
+    # CRS 연결
     cp /usr/share/modsecurity-crs/crs-setup.conf.example /usr/share/modsecurity-crs/crs-setup.conf; \
     printf '%s\n' \
       'Include "/etc/modsecurity/modsecurity.conf"' \
