@@ -258,12 +258,14 @@ jobs:
               dc -f docker-compose.prod.yml run --rm certbot \
                 certonly --webroot -w /var/www/certbot \
                 --non-interactive --keep-until-expiring \
+                --cert-name "$DOMAIN" \
                 --email "$EMAIL" --no-eff-email -d "$DOMAIN" \
                 --agree-tos --rsa-key-size 4096
             else
               dc -f docker-compose.prod.yml run --rm certbot \
                 certonly --webroot -w /var/www/certbot \
                 --non-interactive --keep-until-expiring \
+                --cert-name "$DOMAIN" \
                 --register-unsafely-without-email -d "$DOMAIN" \
                 --agree-tos --rsa-key-size 4096
             fi
@@ -274,7 +276,18 @@ jobs:
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -se' <<'EOF'
             set -euo pipefail
-            CERT_DIR='${{ env.REMOTE_DIR }}/certbot/config/live/${{ env.DOMAIN }}'
+            CERT_ROOT='${{ env.REMOTE_DIR }}/certbot/config/live'
+            DOMAIN='${{ env.DOMAIN }}'
+            CERT_DIR="${CERT_ROOT}/${DOMAIN}"
+
+            # Some legacy runs may have created DOMAIN-0001 style dirs.
+            if [ ! -d "${CERT_DIR}" ]; then
+              ALT_DIR="$(find "${CERT_ROOT}" -maxdepth 1 -mindepth 1 -type d -name "${DOMAIN}-*" | sort | tail -n1 || true)"
+              if [ -n "${ALT_DIR}" ]; then
+                ln -sfn "$(basename "${ALT_DIR}")" "${CERT_DIR}"
+              fi
+            fi
+
             echo "CERT_DIR=${CERT_DIR}"
             test -s "${CERT_DIR}/fullchain.pem"
             test -s "${CERT_DIR}/privkey.pem"
