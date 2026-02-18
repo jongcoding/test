@@ -13,7 +13,6 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     outputs:
-      image-tag: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
 
     steps:
@@ -63,8 +62,9 @@ jobs:
       - name: Trivy image scan (HIGH/CRIT fail)
         uses: aquasecurity/trivy-action@0.28.0
         with:
+          scan-type: image
           image-ref: ${{ env.IMG }}
-          pkg-types: 'os,library'
+          vuln-type: 'os,library'
           severity: 'HIGH,CRITICAL'
           ignore-unfixed: true
           format: sarif
@@ -74,7 +74,7 @@ jobs:
 
       - name: Upload Trivy SARIF
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif
 
@@ -83,7 +83,7 @@ jobs:
         if: always()
         run: |
           trivy image --scanners vuln \
-            --pkg-types os,library \
+            --vuln-type os,library \
             --severity HIGH,CRITICAL \
             --ignore-unfixed \
             --detection-priority precise \
