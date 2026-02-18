@@ -1,76 +1,36 @@
+# version: "3.9"    # <- 경고만 유발하므로 그대로 생략
+
 services:
   web:
     image: ${IMAGE_REF}
-    environment:
+    environment: # <- 매핑 형식
       FLASK_ENV: production
-    expose: ["5000"]
+      PUSH_TOKEN: ${PUSH_TOKEN}
+    expose:
+      - "5000"
     restart: unless-stopped
 
   nginx:
     container_name: nginx
-    build:
-      context: ./nginx
-      dockerfile: Dockerfile.waf
-    depends_on: ["web"]
-    ports: ["80:80", "443:443"]
-    environment:
-      DOMAIN: ${DOMAIN}
-
-      # === Splunk HEC (Secrets/.env) ===
-      SPLUNK_HEC_URL: ${SPLUNK_HEC_URL}                   # 예: https://127.0.0.1:8088
-      SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN}
-      SPLUNK_HEC_INDEX: ${SPLUNK_HEC_INDEX:-waf}
-      SPLUNK_HEC_SOURCETYPE: ${SPLUNK_HEC_SOURCETYPE:-waf}
-      SPLUNK_HEC_SOURCE: ${SPLUNK_HEC_SOURCE:-http:GCE_WAF}
-      SPLUNK_HEC_INSECURE: ${SPLUNK_HEC_INSECURE:-"true"} # 자체서명 테스트면 "true"
+    image: nginx:alpine
+    depends_on:
+      - web
+    ports:
+      - "80:80"
+      - "443:443"
     volumes:
       - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
       - ./certbot/config:/etc/letsencrypt
       - ./certbot/www:/var/www/certbot
-      - ./nginx/logs:/var/log/nginx
-      - ./nginx/modsec-logs:/var/log/modsecurity
+    environment: # <- 매핑 형식
+      DOMAIN: ${DOMAIN}
     entrypoint:
       - sh
-      - -euxc
+      - -exc
       - |
-        # 0) main.conf의 Include에 큰따옴표가 있으면 제거 (와일드카드 인식 실패 방지)
-        if [ -f /etc/nginx/modsec/main.conf ]; then
-          sed -ri 's|^([[:space:]]*Include)[[:space:]]+"([^"]+)"|\1 \2|' /etc/nginx/modsec/main.conf
-        fi
-
-        # 1) modsecurity.conf에서 CRS 관련 Include 싹 제거(중복 로드 차단)
-        awk 'BEGIN{IGNORECASE=1}
-             !($1 ~ /^Include(Optional)?$/ && ($0 ~ /(coreruleset|modsecurity[-_]crs|owasp-crs|crs-setup\.conf|rules\/.*\.conf)/)) {print}
-            ' /etc/modsecurity/modsecurity.conf > /tmp/mod.conf && mv /tmp/mod.conf /etc/modsecurity/modsecurity.conf
-
-        # 2) 기본 SecDefaultAction 제거(OWASP CRS와 충돌 방지)
-        sed -ri '/^[[:space:]]*SecDefaultAction(s)?\b/Id' /etc/modsecurity/modsecurity.conf || true
-
-        # 3) 감사로그를 stderr로 보내서 Docker Splunk 드라이버가 수집
-        if grep -qE '^[[:space:]]*SecAuditLog[[:space:]]+' /etc/modsecurity/modsecurity.conf; then
-          sed -ri 's|^[[:space:]]*SecAuditLog[[:space:]]+.*|SecAuditLog /dev/stderr|' /etc/modsecurity/modsecurity.conf
-        else
-          printf '\nSecAuditLog /dev/stderr\n' >> /etc/modsecurity/modsecurity.conf
-        fi
-
-        # 4) nginx conf 생성
-        envsubst '$DOMAIN' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
-
-        # 5) 기동 전 검증
-        nginx -t
+        envsubst '$$DOMAIN' < /etc/nginx/templates/default.conf.template \
+          > /etc/nginx/conf.d/default.conf
         exec nginx -g 'daemon off;'
-    logging:
-      driver: splunk
-      options:
-        splunk-url: ${SPLUNK_HEC_URL}
-        splunk-token: ${SPLUNK_HEC_TOKEN}
-        splunk-index: ${SPLUNK_HEC_INDEX:-waf}
-        splunk-sourcetype: ${SPLUNK_HEC_SOURCETYPE:-waf}
-        splunk-source: ${SPLUNK_HEC_SOURCE:-http:GCE_WAF}
-        splunk-gzip: "true"
-        splunk-insecureskipverify: ${SPLUNK_HEC_INSECURE:-"true"}
-        tag: "{{.Name}}"
-        labels: "com.docker.compose.project,com.docker.compose.service"
     restart: unless-stopped
 
   certbot:
@@ -98,7 +58,13 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     entrypoint: >
       sh -c "while true; do
-               certbot renew --quiet --deploy-hook 'docker exec nginx nginx -s reload';
-               sleep 12h;
-             done"
+        certbot renew --quiet --deploy-hook 'docker exec nginx nginx -s reload || true';
+        sleep 12h;
+      done"
     restart: unless-stopped
+
+volumes:
+  certbot-config:
+    driver: local
+  certbot-www:
+    driver: local

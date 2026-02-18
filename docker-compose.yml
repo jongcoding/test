@@ -1,13 +1,11 @@
 services:
   web:
     build: .
-    ports:
-      - "5000:5000"
+    ports: 
+      - 5000:5000
     environment:
-      - FLASK_ENV=development
-    # (선택) 코드 변경 시 자동 반영하려면:
-    # volumes:
-    #   - .:/app
+      FLASK_ENV: development
+      PUSH_TOKEN: ${PUSH_TOKEN:-ci_dummy_token}
 
   nginx:
     image: nginx:alpine
@@ -15,6 +13,5 @@ services:
       - "8080:80"
     depends_on:
       - web
-    # 호스트의 설정 파일을 컨테이너에 읽기 전용으로 연결
     volumes:
       - ./nginx:/etc/nginx/conf.d:ro
