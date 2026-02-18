@@ -3,7 +3,7 @@ name: Security – DAST (ZAP after CD)
 on:
   # CD 워크플로우가 "성공"하면 후속 실행
   workflow_run:
-    workflows: ["CD – Build, Push & Deploy to GCE"]
+    workflows: ["CD - Build & Deploy to GKE (Ansible)"]
     types: [completed]
   # 수동/주기 실행도 허용
   workflow_dispatch:

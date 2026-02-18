@@ -2,3 +2,13 @@ venv/
 __pycache__/
 *.pyc
 .env
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# Ansible
+*.retry
+.ansible/

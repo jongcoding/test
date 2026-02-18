@@ -1,0 +1,14 @@
+project_id = "your-gcp-project-id"
+region     = "us-central1"
+
+cluster_name = "edu-gke-cluster"
+node_count   = 1
+machine_type = "e2-medium"
+
+artifact_registry_repository = "edu-flask-repo"
+image_name                   = "flask-app"
+
+labels = {
+  owner = "devops-class"
+  stage = "training"
+}

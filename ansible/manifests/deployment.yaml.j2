@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ app_name }}
+  namespace: {{ namespace }}
+  labels:
+    app.kubernetes.io/name: {{ app_name }}
+spec:
+  replicas: {{ replicas }}
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ app_name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ app_name }}
+    spec:
+      containers:
+        - name: {{ app_name }}
+          image: {{ image_ref }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: {{ container_port }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: {{ container_port }}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: {{ container_port }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

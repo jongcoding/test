@@ -1,0 +1,60 @@
+---
+- name: Deploy Flask app to GKE
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  collections:
+    - kubernetes.core
+
+  vars:
+    app_name: "{{ lookup('env', 'APP_NAME') | default('flask-app', true) }}"
+    namespace: "{{ lookup('env', 'K8S_NAMESPACE') | default('flask-app', true) }}"
+    image_ref: "{{ lookup('env', 'IMAGE_REF') | default('', true) }}"
+    replicas: "{{ lookup('env', 'REPLICAS') | default('2', true) | int }}"
+    service_type: "{{ lookup('env', 'SERVICE_TYPE') | default('LoadBalancer', true) }}"
+    container_port: 5000
+
+  pre_tasks:
+    - name: Ensure IMAGE_REF is provided
+      ansible.builtin.assert:
+        that:
+          - image_ref | length > 0
+        fail_msg: "IMAGE_REF 환경변수가 필요합니다. 예: us-central1-docker.pkg.dev/<project>/<repo>/flask-app:<tag>"
+
+  tasks:
+    - name: Apply namespace/deployment/service manifests
+      kubernetes.core.k8s:
+        state: present
+        template: "{{ playbook_dir }}/../manifests/{{ item }}"
+      loop:
+        - namespace.yaml.j2
+        - deployment.yaml.j2
+        - service.yaml.j2
+
+    - name: Wait until deployment is ready
+      kubernetes.core.k8s_info:
+        api_version: apps/v1
+        kind: Deployment
+        namespace: "{{ namespace }}"
+        name: "{{ app_name }}"
+      register: deployment_info
+      until:
+        - deployment_info.resources | length > 0
+        - (deployment_info.resources[0].status.availableReplicas | default(0) | int) >= replicas
+      retries: 24
+      delay: 10
+
+    - name: Print service information
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Service
+        namespace: "{{ namespace }}"
+        name: "{{ app_name }}"
+      register: service_info
+
+    - name: Show service external endpoint
+      ansible.builtin.debug:
+        msg:
+          - "namespace={{ namespace }}"
+          - "service_type={{ service_type }}"
+          - "external_ip={{ ((service_info.resources[0].status.loadBalancer.ingress | default([]) | first | default({})).ip | default('pending')) }}"

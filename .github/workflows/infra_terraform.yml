@@ -1,0 +1,106 @@
+name: Infra - Terraform for GKE
+
+on:
+  pull_request:
+    paths:
+      - 'infra/terraform/gke/**'
+      - '.github/workflows/infra_terraform.yml'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action'
+        required: true
+        default: plan
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_WORKING_DIR: infra/terraform/gke
+  TF_IN_AUTOMATION: true
+  TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
+  TF_VAR_region: ${{ vars.GCP_REGION }}
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_WORKING_DIR }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate required variables/secrets
+        run: |
+          set -euo pipefail
+
+          if [ -z "${TF_VAR_project_id:-}" ]; then
+            echo "ERROR: GitHub Variable 'GCP_PROJECT_ID' is empty." >&2
+            exit 1
+          fi
+
+          if [ -z "${TF_VAR_region:-}" ]; then
+            echo "ERROR: GitHub Variable 'GCP_REGION' is empty." >&2
+            exit 1
+          fi
+
+          # Terraform에서는 region(us-central1) 값을 사용해야 하며 zone(us-central1-a)은 허용하지 않음
+          if [[ "${TF_VAR_region}" =~ -[a-z]$ ]]; then
+            echo "ERROR: 'GCP_REGION=${TF_VAR_region}' looks like a zone. Use a region value such as 'us-central1'." >&2
+            exit 1
+          fi
+
+          if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
+            echo "ERROR: Secret 'GCP_WORKLOAD_IDENTITY_PROVIDER' is empty." >&2
+            exit 1
+          fi
+
+          if [ -z "${{ secrets.GCP_SERVICE_ACCOUNT }}" ]; then
+            echo "ERROR: Secret 'GCP_SERVICE_ACCOUNT' is empty." >&2
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform plan
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'plan')
+        run: terraform plan -out=tfplan
+
+      - name: Upload Terraform plan
+        if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'plan')
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_WORKING_DIR }}/tfplan
+
+      - name: Terraform apply
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply'
+        run: terraform apply -auto-approve
+
+      - name: Terraform destroy
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'
+        run: terraform destroy -auto-approve
