@@ -7,7 +7,10 @@
   vars:
     app_name: "{{ lookup('env', 'APP_NAME') | default('flask-app', true) }}"
     namespace: "{{ lookup('env', 'K8S_NAMESPACE') | default('flask-app', true) }}"
-    image_ref: "{{ lookup('env', 'IMAGE_REF') | default('', true) }}"
+    image_ref_env: "{{ lookup('env', 'IMAGE_REF') | default('', true) | trim }}"
+    dockerhub_username: "{{ lookup('env', 'DOCKERHUB_USERNAME') | default('', true) | trim }}"
+    image_ref_fallback: "{{ (dockerhub_username ~ '/' ~ app_name ~ ':latest') if (dockerhub_username | length > 0) else (app_name ~ ':latest') }}"
+    image_ref: "{{ image_ref_env if (image_ref_env | length > 0) else image_ref_fallback }}"
     replicas: "{{ lookup('env', 'REPLICAS') | default('2', true) | int }}"
     service_type: "{{ lookup('env', 'SERVICE_TYPE') | default('NodePort', true) }}"
     node_port: "{{ lookup('env', 'K3S_NODE_PORT') | default('30080', true) | int }}"
@@ -15,11 +18,11 @@
     k3s_install_exec: "--write-kubeconfig-mode 644 --disable traefik"
 
   pre_tasks:
-    - name: Ensure IMAGE_REF is provided
-      ansible.builtin.assert:
-        that:
-          - image_ref | length > 0
-        fail_msg: "IMAGE_REF 환경변수가 필요합니다. 예: docker.io/<username>/flask-app:<tag>"
+    - name: Show selected image reference
+      ansible.builtin.debug:
+        msg:
+          - "image_ref={{ image_ref }}"
+          - "source={{ 'IMAGE_REF' if (image_ref_env | length > 0) else 'fallback(latest)' }}"
 
     - name: Ensure node port range is valid
       ansible.builtin.assert:

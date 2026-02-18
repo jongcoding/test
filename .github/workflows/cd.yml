@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       image_ref: ${{ steps.meta.outputs.image_ref }}
+      image_digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout
@@ -71,6 +72,7 @@ jobs:
           echo "image_latest=${IMAGE_LATEST}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push image
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -116,9 +118,28 @@ jobs:
           ${GCP_HOST} ansible_user=${GCP_USER}
           EOF_INV
 
+      - name: Resolve image reference
+        id: image_ref
+        env:
+          IMAGE_REF_FROM_BUILD: ${{ needs.build-and-push.outputs.image_ref }}
+          IMAGE_DIGEST: ${{ needs.build-and-push.outputs.image_digest }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          set -euo pipefail
+          if [ -n "${IMAGE_DIGEST:-}" ]; then
+            REF="${DOCKERHUB_USERNAME}/${IMAGE_NAME}@${IMAGE_DIGEST}"
+          elif [ -n "${IMAGE_REF_FROM_BUILD:-}" ]; then
+            REF="${IMAGE_REF_FROM_BUILD}"
+          else
+            REF="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${GITHUB_SHA}"
+          fi
+          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
+          echo "Using IMAGE_REF=${REF}"
+
       - name: Deploy k3s workload with Ansible
         env:
-          IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
+          IMAGE_REF: ${{ steps.image_ref.outputs.ref }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
           APP_NAME: ${{ vars.APP_NAME }}
           K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
           REPLICAS: ${{ vars.REPLICAS }}
