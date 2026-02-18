@@ -245,18 +245,23 @@ jobs:
               exit 1
             fi
 
-            # If LETSENCRYPT_EMAIL is empty, certbot requires the unsafe flag for non-interactive runs.
-            if [ -n '${{ env.LETSENCRYPT_EMAIL }}' ]; then
-              EMAIL_ARGS="--email '${{ env.LETSENCRYPT_EMAIL }}' --no-eff-email"
-            else
-              EMAIL_ARGS="--register-unsafely-without-email"
-            fi
+            EMAIL='${{ env.LETSENCRYPT_EMAIL }}'
+            DOMAIN='${{ env.DOMAIN }}'
 
-            dc -f docker-compose.prod.yml run --rm certbot \
-              certonly --webroot -w /var/www/certbot \
-              --non-interactive --keep-until-expiring \
-              ${EMAIL_ARGS} -d '${{ env.DOMAIN }}' \
-              --agree-tos --rsa-key-size 4096
+            # If LETSENCRYPT_EMAIL is empty, certbot requires the unsafe flag for non-interactive runs.
+            if [ -n "$EMAIL" ]; then
+              dc -f docker-compose.prod.yml run --rm certbot \
+                certonly --webroot -w /var/www/certbot \
+                --non-interactive --keep-until-expiring \
+                --email "$EMAIL" --no-eff-email -d "$DOMAIN" \
+                --agree-tos --rsa-key-size 4096
+            else
+              dc -f docker-compose.prod.yml run --rm certbot \
+                certonly --webroot -w /var/www/certbot \
+                --non-interactive --keep-until-expiring \
+                --register-unsafely-without-email -d "$DOMAIN" \
+                --agree-tos --rsa-key-size 4096
+            fi
           EOF
 
       # ── 6. SSL helper 파일 확보(+디렉터리 보장) ──────────────────────────
