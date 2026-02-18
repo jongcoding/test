@@ -276,22 +276,37 @@ jobs:
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -se' <<'EOF'
             set -euo pipefail
-            CERT_ROOT='${{ env.REMOTE_DIR }}/certbot/config/live'
+            cd '${{ env.REMOTE_DIR }}'
             DOMAIN='${{ env.DOMAIN }}'
-            CERT_DIR="${CERT_ROOT}/${DOMAIN}"
 
-            # Some legacy runs may have created DOMAIN-0001 style dirs.
-            if [ ! -d "${CERT_DIR}" ]; then
-              ALT_DIR="$(find "${CERT_ROOT}" -maxdepth 1 -mindepth 1 -type d -name "${DOMAIN}-*" | sort | tail -n1 || true)"
-              if [ -n "${ALT_DIR}" ]; then
-                ln -sfn "$(basename "${ALT_DIR}")" "${CERT_DIR}"
-              fi
+            if docker compose version >/dev/null 2>&1; then
+              dc() { docker compose "$@"; }
+            elif command -v docker-compose >/dev/null 2>&1; then
+              dc() { docker-compose "$@"; }
+            else
+              echo "ERROR: Docker Compose not found on remote host." >&2
+              exit 1
             fi
 
-            echo "CERT_DIR=${CERT_DIR}"
-            test -s "${CERT_DIR}/fullchain.pem"
-            test -s "${CERT_DIR}/privkey.pem"
-            ls -l "${CERT_DIR}/fullchain.pem" "${CERT_DIR}/privkey.pem"
+            # Check cert files inside certbot container (root-owned files may be unreadable on host).
+            dc -f docker-compose.prod.yml run --rm -e DOMAIN="$DOMAIN" --entrypoint sh certbot -ec '
+              CERT_ROOT=/etc/letsencrypt/live
+              CERT_DIR="${CERT_ROOT}/${DOMAIN}"
+
+              if [ ! -d "${CERT_DIR}" ]; then
+                ALT_DIR="$(find "${CERT_ROOT}" -maxdepth 1 -mindepth 1 -type d -name "${DOMAIN}-*" | sort | tail -n1 || true)"
+                if [ -n "${ALT_DIR}" ]; then
+                  ln -sfn "$(basename "${ALT_DIR}")" "${CERT_DIR}"
+                fi
+              fi
+
+              echo "CERT_DIR=${CERT_DIR}"
+              ls -la "${CERT_ROOT}" || true
+              ls -la "${CERT_DIR}" || true
+              test -s "${CERT_DIR}/fullchain.pem"
+              test -s "${CERT_DIR}/privkey.pem"
+              ls -l "${CERT_DIR}/fullchain.pem" "${CERT_DIR}/privkey.pem"
+            '
           EOF
 
       # ── 6. SSL helper 파일 확보(+디렉터리 보장) ──────────────────────────
@@ -450,8 +465,10 @@ jobs:
             dc -f docker-compose.prod.yml logs --tail=200 certbot || true
 
             echo "== cert files =="
-            ls -la ./certbot/config/live || true
-            ls -la "./certbot/config/live/${{ env.DOMAIN }}" || true
+            dc -f docker-compose.prod.yml run --rm -e DOMAIN='${{ env.DOMAIN }}' --entrypoint sh certbot -ec '
+              ls -la /etc/letsencrypt/live || true
+              ls -la "/etc/letsencrypt/live/${DOMAIN}" || true
+            '
 
             echo "== rendered nginx template =="
             sed -n '1,220p' ./nginx/default.conf.template || true
