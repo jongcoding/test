@@ -1,22 +1,18 @@
-name: CD - Build & Deploy to GKE (Ansible)
+name: CD - Build & Deploy to GCE k3s
 
 on:
   push:
     branches: [ main ]
-    tags: [ 'v*.*.*' ]
   workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write
 
 env:
-  PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-  GAR_LOCATION: ${{ vars.GAR_LOCATION }}
-  GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY }}
   IMAGE_NAME: flask-app
-  GKE_CLUSTER_NAME: ${{ vars.GKE_CLUSTER_NAME }}
-  GKE_LOCATION: ${{ vars.GKE_LOCATION }}
+  GCP_HOST: ${{ secrets.GCP_HOST }}
+  GCP_USER: ${{ secrets.GCP_USER }}
+  REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
 
 jobs:
   build-and-push:
@@ -32,48 +28,47 @@ jobs:
         run: |
           set -euo pipefail
 
-          required_vars=(PROJECT_ID GAR_LOCATION GAR_REPOSITORY)
+          required_vars=(GCP_HOST GCP_USER)
           for v in "${required_vars[@]}"; do
             if [ -z "${!v:-}" ]; then
-              echo "ERROR: GitHub Variables '$v' is empty." >&2
+              echo "ERROR: GitHub Secret/Variable '$v' is empty." >&2
               exit 1
             fi
           done
 
-          if [ -z "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}" ]; then
-            echo "ERROR: Secret 'GCP_WORKLOAD_IDENTITY_PROVIDER' is empty." >&2
+          if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
+            echo "ERROR: Secret 'DOCKERHUB_USERNAME' is empty." >&2
             exit 1
           fi
 
-          if [ -z "${{ secrets.GCP_SERVICE_ACCOUNT }}" ]; then
-            echo "ERROR: Secret 'GCP_SERVICE_ACCOUNT' is empty." >&2
+          if [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            echo "ERROR: Secret 'DOCKERHUB_TOKEN' is empty." >&2
             exit 1
           fi
 
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
+          if [ -z "${{ secrets.GCP_SSH_KEY }}" ]; then
+            echo "ERROR: Secret 'GCP_SSH_KEY' is empty." >&2
+            exit 1
+          fi
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
         with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker "${GAR_LOCATION}-docker.pkg.dev" --quiet
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Compute image tags
         id: meta
         run: |
           set -euo pipefail
-          IMAGE_REF="${GAR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:${GITHUB_SHA}"
-          IMAGE_LATEST="${GAR_LOCATION}-docker.pkg.dev/${PROJECT_ID}/${GAR_REPOSITORY}/${IMAGE_NAME}:latest"
+          IMAGE_REF="${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:${GITHUB_SHA}"
+          IMAGE_LATEST="${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:latest"
 
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
           echo "image_latest=${IMAGE_LATEST}" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Build and push image
         uses: docker/build-push-action@v6
@@ -94,60 +89,41 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Validate cluster variables
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GCP_SSH_KEY }}
+
+      - name: Add host key
         run: |
-          set -euo pipefail
-
-          required_vars=(PROJECT_ID GKE_CLUSTER_NAME GKE_LOCATION)
-          for v in "${required_vars[@]}"; do
-            if [ -z "${!v:-}" ]; then
-              echo "ERROR: GitHub Variables '$v' is empty." >&2
-              exit 1
-            fi
-          done
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
-
-      - name: Setup gcloud CLI
-        uses: google-github-actions/setup-gcloud@v2
-
-      - name: Get GKE credentials
-        uses: google-github-actions/get-gke-credentials@v2
-        with:
-          cluster_name: ${{ env.GKE_CLUSTER_NAME }}
-          location: ${{ env.GKE_LOCATION }}
-          project_id: ${{ env.PROJECT_ID }}
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$GCP_HOST" >> ~/.ssh/known_hosts
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install Ansible + dependencies
+      - name: Install Ansible
         run: |
           python -m pip install --upgrade pip
-          pip install ansible-core kubernetes
-          ansible-galaxy collection install -r ansible/requirements.yml
+          pip install ansible-core
 
-      - name: Deploy to GKE with Ansible
+      - name: Build dynamic inventory
+        run: |
+          cat > ansible/inventory/gce_k3s.ini <<EOF_INV
+          [k3s_nodes]
+          ${GCP_HOST} ansible_user=${GCP_USER}
+          EOF_INV
+
+      - name: Deploy k3s workload with Ansible
         env:
           IMAGE_REF: ${{ needs.build-and-push.outputs.image_ref }}
           APP_NAME: ${{ vars.APP_NAME }}
           K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
           REPLICAS: ${{ vars.REPLICAS }}
           SERVICE_TYPE: ${{ vars.SERVICE_TYPE }}
-        run: ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/playbooks/deploy-gke.yml
-
-      - name: Check rollout status
-        env:
-          K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
-          APP_NAME: ${{ vars.APP_NAME }}
+          K3S_NODE_PORT: ${{ vars.K3S_NODE_PORT }}
         run: |
-          NS="${K8S_NAMESPACE:-flask-app}"
-          APP="${APP_NAME:-flask-app}"
-          kubectl -n "$NS" get deployment,service
-          kubectl -n "$NS" rollout status deployment/"$APP" --timeout=180s || true
+          ANSIBLE_CONFIG=ansible/ansible.cfg \
+          ansible-playbook -i ansible/inventory/gce_k3s.ini ansible/playbooks/deploy-gce-k3s.yml

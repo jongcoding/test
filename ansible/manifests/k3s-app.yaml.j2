@@ -1,3 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ namespace }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -7,7 +12,6 @@ metadata:
     app.kubernetes.io/name: {{ app_name }}
 spec:
   replicas: {{ replicas }}
-  revisionHistoryLimit: 3
   selector:
     matchLabels:
       app.kubernetes.io/name: {{ app_name }}
@@ -19,7 +23,7 @@ spec:
       containers:
         - name: {{ app_name }}
           image: {{ image_ref }}
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - containerPort: {{ container_port }}
           readinessProbe:
@@ -41,3 +45,20 @@ spec:
             limits:
               cpu: "500m"
               memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ app_name }}
+  namespace: {{ namespace }}
+spec:
+  type: {{ service_type }}
+  selector:
+    app.kubernetes.io/name: {{ app_name }}
+  ports:
+    - name: http
+      port: 80
+      targetPort: {{ container_port }}
+{% if service_type == 'NodePort' %}
+      nodePort: {{ node_port }}
+{% endif %}

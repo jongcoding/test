@@ -3,7 +3,7 @@ name: Security – DAST (ZAP after CD)
 on:
   # CD 워크플로우가 "성공"하면 후속 실행
   workflow_run:
-    workflows: ["CD - Build & Deploy to GKE (Ansible)"]
+    workflows: ["CD - Build & Deploy to GCE k3s"]
     types: [completed]
   # 수동/주기 실행도 허용
   workflow_dispatch:
@@ -28,7 +28,7 @@ jobs:
       actions: write   # artifact 업로드 여유 권한
 
     env:
-      TARGET: https://${{ secrets.DOMAIN }}
+      TARGET: https://${{ secrets.DOMAIN || vars.DOMAIN }}
       SCAN_MINUTES: "5"   # ZAP baseline spider 시간
       USE_ALPHA: "1"      # 1이면 -a 활성
 

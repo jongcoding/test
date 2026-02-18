@@ -1,127 +1,70 @@
-# DevOps 교육용 실습 레포 (Terraform + Ansible + GKE + GitHub Actions)
+# DevOps 교육용 실습 레포 (GCE + k3s)
 
-이 레포는 Flask 앱을 대상으로, 아래 4가지를 한 번에 실습하도록 구성했습니다.
+Flask 앱을 GCE VM 1대 위에 k3s로 배포하는 교육용 레포입니다.
 
-- Terraform으로 GKE/Artifact Registry 인프라 생성
-- Ansible로 Kubernetes 배포 자동화
-- GitHub Actions로 이미지 빌드/배포 파이프라인 실행
-- 기본 CI/Security/DAST 워크플로우 확인
+## 1) 구성
 
-## 1) 현재 구성
+- 앱: `app.py`
+- CI: `.github/workflows/flask_ci.yml`
+- 보안 스캔: `.github/workflows/security.yml`
+- DAST: `.github/workflows/dast.yml`
+- 인프라(Terraform): `infra/terraform/gce_k3s`
+- 배포(Ansible): `ansible/playbooks/deploy-gce-k3s.yml`
+- CD: `.github/workflows/cd.yml`
+- 인프라 워크플로우: `.github/workflows/infra_terraform.yml`
 
-- 앱: `app.py` (Flask)
-- 로컬 실행: `docker-compose.yml`
-- 인프라 코드: `infra/terraform/gke`
-- 배포 코드: `ansible/playbooks/deploy-gke.yml`
-- CD 파이프라인: `.github/workflows/cd.yml` (GKE 배포)
-- 인프라 파이프라인: `.github/workflows/infra_terraform.yml`
+## 2) GitHub Variables
 
-## 2) 디렉터리 구조
+- `GCP_PROJECT_ID` (또는 Secret로 등록 가능)
+- `GCE_REGION` (선택, 기본 `us-central1`)
+- `GCE_ZONE` (선택, 기본 `us-central1-a`)
+- `APP_NAME` (선택, 기본 `flask-app`)
+- `K8S_NAMESPACE` (선택, 기본 `flask-app`)
+- `REPLICAS` (선택, 기본 `2`)
+- `SERVICE_TYPE` (선택, 기본 `NodePort`)
+- `K3S_NODE_PORT` (선택, 기본 `30080`)
 
-```text
-.
-├── .github/workflows
-│   ├── flask_ci.yml
-│   ├── security.yml
-│   ├── cd.yml
-│   ├── infra_terraform.yml
-│   └── dast.yml
-├── ansible
-│   ├── ansible.cfg
-│   ├── inventory/hosts.ini
-│   ├── manifests/*.yaml.j2
-│   └── playbooks/deploy-gke.yml
-├── infra/terraform/gke
-│   ├── main.tf
-│   ├── variables.tf
-│   ├── outputs.tf
-│   ├── provider.tf
-│   ├── versions.tf
-│   └── terraform.tfvars.example
-└── app.py
-```
+## 3) GitHub Secrets
 
-## 3) 사전 준비
+- `GCP_WORKLOAD_IDENTITY_PROVIDER` (Terraform 자동화 시)
+- `GCP_SERVICE_ACCOUNT` (Terraform 자동화 시)
+- `GCP_HOST` (Terraform apply 후 VM 외부 IP)
+- `GCP_USER` (예: `ubuntu`)
+- `GCP_SSH_KEY` (CD SSH 접속 + Terraform용 공개키 자동 파생)
+- `REMOTE_APP_DIR` (선택, 레거시 변수)
+- `DOCKERHUB_USERNAME`
+- `DOCKERHUB_TOKEN`
+- `DOMAIN` (DAST 타깃 도메인)
 
-- GCP 프로젝트 1개
-- `gcloud`, `kubectl`, `terraform` 설치
-- GitHub 저장소의 Actions 활성화
-- Workload Identity Federation (GitHub OIDC)로 GCP 인증 구성
+## 4) 실행 순서
 
-## 4) GitHub 설정값
+### Step A. 인프라 생성
 
-### Variables
+1. `Actions > Infra - Terraform for GCE k3s` 실행
+2. `action=plan` 후 `action=apply` 실행
+3. 생성된 외부 IP를 `GCP_HOST` Secret(또는 Variable)에 설정
 
-- `GCP_PROJECT_ID`: GCP 프로젝트 ID
-- `GCP_REGION`: Terraform에서 사용할 리전 (예: `us-central1`, `us-central1-a` 같은 zone 값 사용 금지)
-- `GAR_LOCATION`: Artifact Registry 리전 (예: `us-central1`)
-- `GAR_REPOSITORY`: Artifact Registry 저장소 이름 (예: `edu-flask-repo`)
-- `GKE_CLUSTER_NAME`: Terraform으로 만든 클러스터 이름 (예: `edu-gke-cluster`)
-- `GKE_LOCATION`: GKE 리전 (예: `us-central1`)
-- `APP_NAME` (선택): 기본값 `flask-app`
-- `K8S_NAMESPACE` (선택): 기본값 `flask-app`
-- `REPLICAS` (선택): 기본값 `2`
-- `SERVICE_TYPE` (선택): 기본값 `LoadBalancer`
+### Step B. 앱 배포
 
-### Secrets
+1. `Actions > CD - Build & Deploy to GCE k3s` 실행
+2. 성공 후 접속: `http://<GCP_HOST>:30080`
 
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`: WIF Provider 리소스 경로
-- `GCP_SERVICE_ACCOUNT`: Actions가 사용할 GCP 서비스 계정 이메일
+### Step C. 검증
 
-### 서비스 계정 권한(교육용 최소 예시)
+- `security.yml` 결과 확인
+- CD 성공 후 `dast.yml` 결과 확인
 
-- Terraform 실행용: `roles/container.admin`, `roles/compute.networkAdmin`, `roles/artifactregistry.admin`, `roles/serviceusage.serviceUsageAdmin`
-- 배포 실행용: `roles/container.developer`, `roles/artifactregistry.writer`
-
-## 5) 실습 순서 (입문자 권장)
-
-### Step A. 로컬 앱 확인
+## 5) 수동 배포(로컬에서 직접)
 
 ```bash
-docker compose up -d --build
-curl http://localhost:5000
+cp ansible/inventory/gce_k3s.ini.example ansible/inventory/gce_k3s.ini
+
+# ansible/inventory/gce_k3s.ini 예시
+# [k3s_nodes]
+# <GCE_IP> ansible_user=ubuntu
+
+IMAGE_REF="<dockerhub-user>/flask-app:<tag>" \
+K3S_NODE_PORT=30080 \
+ANSIBLE_CONFIG=ansible/ansible.cfg \
+ansible-playbook -i ansible/inventory/gce_k3s.ini ansible/playbooks/deploy-gce-k3s.yml
 ```
-
-### Step B. Terraform으로 인프라 생성
-
-```bash
-cd infra/terraform/gke
-cp terraform.tfvars.example terraform.tfvars
-# terraform.tfvars에서 project_id 수정
-terraform init
-terraform plan
-terraform apply
-```
-
-### Step C. 로컬에서 Ansible 배포 테스트
-
-```bash
-# kubeconfig 연결
-gcloud container clusters get-credentials edu-gke-cluster --region us-central1 --project <PROJECT_ID>
-
-# 컬렉션/의존성
-ansible-galaxy collection install -r ansible/requirements.yml
-python3 -m pip install ansible-core kubernetes
-
-# 배포
-IMAGE_REF="us-central1-docker.pkg.dev/<PROJECT_ID>/edu-flask-repo/flask-app:manual" \
-ANSIBLE_CONFIG=ansible/ansible.cfg ansible-playbook ansible/playbooks/deploy-gke.yml
-```
-
-### Step D. GitHub Actions 자동화
-
-1. `infra_terraform.yml`을 수동 실행해 `plan/apply/destroy` 실습
-2. `main` 브랜치에 push하면 `cd.yml`이 이미지 빌드 후 GKE 배포
-3. `security.yml`, `dast.yml` 결과를 Security 탭/Artifacts에서 확인
-
-## 6) 교육 포인트
-
-- 인프라와 애플리케이션 배포 파이프라인 분리
-- 선언형 코드(Terraform/Ansible/Jinja2) 기반 반복 배포
-- GitHub OIDC로 장기 키 없이 GCP 인증
-- CI/CD + 보안 스캔 연계
-
-## 7) 참고
-
-- 기존 GCE VM 중심 CD는 GKE 기반 CD로 전환되어 있습니다.
-- DAST 워크플로우는 새 CD 이름(`CD - Build & Deploy to GKE (Ansible)`)을 추적합니다.
