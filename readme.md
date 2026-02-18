@@ -67,4 +67,5 @@ IMAGE_REF="<dockerhub-user>/flask-app:<tag>" \
 K3S_NODE_PORT=30080 \
 ANSIBLE_CONFIG=ansible/ansible.cfg \
 ansible-playbook -i ansible/inventory/gce_k3s.ini ansible/playbooks/deploy-gce-k3s.yml
+
 ```
