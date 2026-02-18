@@ -199,11 +199,25 @@ jobs:
       # ── 3. 스택 기동 (80) ───────────────────────────────────────────────
       - name: Start HTTP-only stack
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
-            cd '${{ env.REMOTE_DIR }}' &&
-            docker compose -f docker-compose.prod.yml down --remove-orphans || true &&
-            docker compose -f docker-compose.prod.yml up -d nginx web
-          "
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -se' <<'EOF'
+            set -euo pipefail
+            cd '${{ env.REMOTE_DIR }}'
+
+            # Support both Compose v2 (docker compose) and v1 (docker-compose) on the remote host.
+            if docker compose version >/dev/null 2>&1; then
+              dc() { docker compose "$@"; }
+            elif command -v docker-compose >/dev/null 2>&1; then
+              dc() { docker-compose "$@"; }
+            else
+              echo "ERROR: Docker Compose not found on remote host." >&2
+              echo "Install (Ubuntu/Debian): sudo apt-get update -y && sudo apt-get install -y docker-compose-plugin" >&2
+              echo "or legacy v1: sudo apt-get install -y docker-compose" >&2
+              exit 1
+            fi
+
+            dc -f docker-compose.prod.yml down --remove-orphans || true
+            dc -f docker-compose.prod.yml up -d nginx web
+          EOF
 
       # ── 4. HTTP 응답 대기 ───────────────────────────────────────────────
       - name: Wait for HTTP
@@ -218,21 +232,50 @@ jobs:
       # ── 5. 인증서 발급/갱신 ──────────────────────────────────────────────
       - name: Issue / Renew SSL
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
-            cd '${{ env.REMOTE_DIR }}' &&
-            docker compose -f docker-compose.prod.yml run --rm certbot \
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -se' <<'EOF'
+            set -euo pipefail
+            cd '${{ env.REMOTE_DIR }}'
+
+            if docker compose version >/dev/null 2>&1; then
+              dc() { docker compose "$@"; }
+            elif command -v docker-compose >/dev/null 2>&1; then
+              dc() { docker-compose "$@"; }
+            else
+              echo "ERROR: Docker Compose not found on remote host." >&2
+              exit 1
+            fi
+
+            # If LETSENCRYPT_EMAIL is empty, certbot requires the unsafe flag for non-interactive runs.
+            if [ -n '${{ env.LETSENCRYPT_EMAIL }}' ]; then
+              EMAIL_ARGS="--email '${{ env.LETSENCRYPT_EMAIL }}' --no-eff-email"
+            else
+              EMAIL_ARGS="--register-unsafely-without-email"
+            fi
+
+            dc -f docker-compose.prod.yml run --rm certbot \
               certonly --webroot -w /var/www/certbot \
               --non-interactive --keep-until-expiring \
-              --email '${{ env.LETSENCRYPT_EMAIL }}' -d '${{ env.DOMAIN }}' \
-              --agree-tos --no-eff-email --rsa-key-size 4096
-          "
+              ${EMAIL_ARGS} -d '${{ env.DOMAIN }}' \
+              --agree-tos --rsa-key-size 4096
+          EOF
 
       # ── 6. SSL helper 파일 확보(+디렉터리 보장) ──────────────────────────
       - name: Provide ssl helper files for nginx
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -se' <<'EOF'
+            set -euo pipefail
             cd '${{ env.REMOTE_DIR }}'
-            docker compose -f docker-compose.prod.yml run --rm --entrypoint "" certbot sh -euxc '
+
+            if docker compose version >/dev/null 2>&1; then
+              dc() { docker compose "$@"; }
+            elif command -v docker-compose >/dev/null 2>&1; then
+              dc() { docker-compose "$@"; }
+            else
+              echo "ERROR: Docker Compose not found on remote host." >&2
+              exit 1
+            fi
+
+            dc -f docker-compose.prod.yml run --rm --entrypoint "" certbot sh -euxc '
               OPTIONS=/etc/letsencrypt/options-ssl-nginx.conf
               DHPARAM=/etc/letsencrypt/ssl-dhparams.pem
 
@@ -278,23 +321,45 @@ jobs:
       # ── 8. conf 재생성 & nginx reload ───────────────────────────────────
       - name: Apply HTTPS config & reload nginx
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -se' <<'EOF'
+            set -euo pipefail
             cd '${{ env.REMOTE_DIR }}'
-            docker compose -f docker-compose.prod.yml run --rm --no-deps --entrypoint sh nginx -ec "
+
+            if docker compose version >/dev/null 2>&1; then
+              dc() { docker compose "$@"; }
+            elif command -v docker-compose >/dev/null 2>&1; then
+              dc() { docker-compose "$@"; }
+            else
+              echo "ERROR: Docker Compose not found on remote host." >&2
+              exit 1
+            fi
+
+            dc -f docker-compose.prod.yml run --rm --no-deps --entrypoint sh nginx -ec "
               envsubst '\$DOMAIN' < /etc/nginx/templates/default.conf.template > /etc/nginx/conf.d/default.conf
               nginx -t
             "
-            docker compose -f docker-compose.prod.yml up -d --force-recreate nginx
+            dc -f docker-compose.prod.yml up -d --force-recreate nginx
           EOF
 
       # ── 9. 최신 이미지 pull & 전체 스택 ─────────────────────────────────
       - name: Deploy latest stack
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
-            cd '${{ env.REMOTE_DIR }}' &&
-            docker compose -f docker-compose.prod.yml pull &&
-            docker compose -f docker-compose.prod.yml up -d --remove-orphans
-          "
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} 'bash -se' <<'EOF'
+            set -euo pipefail
+            cd '${{ env.REMOTE_DIR }}'
+
+            if docker compose version >/dev/null 2>&1; then
+              dc() { docker compose "$@"; }
+            elif command -v docker-compose >/dev/null 2>&1; then
+              dc() { docker-compose "$@"; }
+            else
+              echo "ERROR: Docker Compose not found on remote host." >&2
+              exit 1
+            fi
+
+            dc -f docker-compose.prod.yml pull
+            dc -f docker-compose.prod.yml up -d --remove-orphans
+          EOF
 
       # ── 10. HTTPS 검증 ──────────────────────────────────────────────────
       - name: Verify HTTPS
