@@ -15,6 +15,7 @@ jobs:
     outputs:
       image-tags: ${{ steps.meta.outputs.tags }}
       image-digest: ${{ steps.build.outputs.digest }}
+      image-ref: ${{ steps.image_ref.outputs.value }}
 
     steps:
       - uses: actions/checkout@v4
@@ -59,6 +60,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Export image reference
+        id: image_ref
+        run: |
+          echo "value=${{ secrets.DOCKERHUB_USERNAME }}/flask-app@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+
   security-gate:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -67,7 +73,7 @@ jobs:
       id-token: write
       security-events: write
     env:
-      IMG: ${{ secrets.DOCKERHUB_USERNAME }}/flask-app@${{ needs.build-and-push.outputs.image-digest }}
+      IMG: ${{ needs.build-and-push.outputs.image-ref }}
 
     steps:
       - uses: actions/checkout@v4
@@ -147,7 +153,7 @@ jobs:
       GCP_USER: ${{ secrets.GCP_USER }}
       DOMAIN: ${{ secrets.DOMAIN }}
       LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
-      IMG: ${{ secrets.DOCKERHUB_USERNAME }}/flask-app@${{ needs.build-and-push.outputs.image-digest }}
+      IMG: ${{ needs.build-and-push.outputs.image-ref }}
       K3S_NODE_PORT: ${{ vars.K3S_NODE_PORT }}
 
     steps:

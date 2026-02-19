@@ -17,9 +17,12 @@
     domain_env: "{{ lookup('env', 'DOMAIN') | default('', true) | trim }}"
     ingress_host_env: "{{ lookup('env', 'INGRESS_HOST') | default('', true) | trim }}"
     ingress_host: "{{ ingress_host_env if (ingress_host_env | length > 0) else domain_env }}"
+    tls_enabled: "{{ (ingress_host | length > 0) | bool }}"
     letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('', true) | trim }}"
     tls_secret_name: "{{ lookup('env', 'TLS_SECRET_NAME') | default(app_name ~ '-tls', true) }}"
     certbot_contact_arg: "{{ ('--email ' ~ letsencrypt_email) if (letsencrypt_email | length > 0) else '--register-unsafely-without-email' }}"
+    cert_fullchain_path: "/etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem"
+    cert_privkey_path: "/etc/letsencrypt/live/{{ ingress_host }}/privkey.pem"
     container_port: 5000
     k3s_install_exec: "--write-kubeconfig-mode 644"
 
@@ -30,6 +33,7 @@
           - "image_ref={{ image_ref }}"
           - "source={{ 'IMAGE_REF' if (image_ref_env | length > 0) else 'fallback(latest)' }}"
           - "ingress_host={{ ingress_host if (ingress_host | length > 0) else '<none>' }}"
+          - "tls_enabled={{ tls_enabled }}"
           - "service_type={{ service_type }}"
           - "tls_secret_name={{ tls_secret_name }}"
           - "certbot_email={{ letsencrypt_email if (letsencrypt_email | length > 0) else '<none>' }}"
@@ -97,53 +101,51 @@
         - k3s_bin.rc == 0
         - k3s_disable_traefik.rc == 0
 
-    - name: Install certbot package for TLS issuance
-      ansible.builtin.apt:
-        name: certbot
-        state: present
-      when: ingress_host | length > 0
+    - name: Ensure TLS certificate and files (optional)
+      when: tls_enabled
+      block:
+        - name: Install certbot package for TLS issuance
+          ansible.builtin.apt:
+            name: certbot
+            state: present
 
-    - name: Issue or renew Let's Encrypt certificate using certbot
-      ansible.builtin.shell: |
-        set -euo pipefail
-        CERT_FILE="/etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem"
-        # 인증서가 30일 이상 유효하면 k3s 다운타임 없이 재발급 스킵
-        if [ -s "$CERT_FILE" ] && openssl x509 -checkend 2592000 -noout -in "$CERT_FILE"; then
-          echo "Existing cert for {{ ingress_host }} is valid for more than 30 days. Skip re-issue."
-          exit 0
-        fi
-        trap 'systemctl start k3s || true' EXIT
-        systemctl stop k3s
-        if command -v k3s-killall.sh >/dev/null 2>&1; then
-          # standalone challenge를 확실히 받기 위해 남아있는 k3s 컨테이너/iptables 규칙 정리
-          k3s-killall.sh || true
-        fi
-        certbot certonly \
-          --standalone \
-          --preferred-challenges http \
-          --non-interactive \
-          --agree-tos \
-          --keep-until-expiring \
-          {{ certbot_contact_arg }} \
-          -d "{{ ingress_host }}"
-        systemctl start k3s
-        trap - EXIT
-      args:
-        executable: /bin/bash
-      when: ingress_host | length > 0
+        - name: Issue or renew Let's Encrypt certificate using certbot
+          ansible.builtin.shell: |
+            set -euo pipefail
+            # 인증서가 30일 이상 유효하면 k3s 다운타임 없이 재발급 스킵
+            if [ -s "{{ cert_fullchain_path }}" ] && openssl x509 -checkend 2592000 -noout -in "{{ cert_fullchain_path }}"; then
+              echo "Existing cert for {{ ingress_host }} is valid for more than 30 days. Skip re-issue."
+              exit 0
+            fi
+            trap 'systemctl start k3s || true' EXIT
+            systemctl stop k3s
+            if command -v k3s-killall.sh >/dev/null 2>&1; then
+              # standalone challenge를 확실히 받기 위해 남아있는 k3s 컨테이너/iptables 규칙 정리
+              k3s-killall.sh || true
+            fi
+            certbot certonly \
+              --standalone \
+              --preferred-challenges http \
+              --non-interactive \
+              --agree-tos \
+              --keep-until-expiring \
+              {{ certbot_contact_arg }} \
+              -d "{{ ingress_host }}"
+            systemctl start k3s
+            trap - EXIT
+          args:
+            executable: /bin/bash
 
-    - name: Ensure certbot certificate files exist
-      ansible.builtin.stat:
-        path: "/etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem"
-      register: certbot_fullchain
-      when: ingress_host | length > 0
+        - name: Ensure certbot certificate files exist
+          ansible.builtin.stat:
+            path: "{{ cert_fullchain_path }}"
+          register: certbot_fullchain
 
-    - name: Validate certbot certificate was created
-      ansible.builtin.assert:
-        that:
-          - certbot_fullchain.stat.exists
-        fail_msg: "certbot 인증서 생성 실패: /etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem"
-      when: ingress_host | length > 0
+        - name: Validate certbot certificate was created
+          ansible.builtin.assert:
+            that:
+              - certbot_fullchain.stat.exists
+            fail_msg: "certbot 인증서 생성 실패: {{ cert_fullchain_path }}"
 
     - name: Ensure k3s service is enabled and running
       ansible.builtin.systemd:
@@ -185,12 +187,12 @@
       ansible.builtin.shell: |
         set -euo pipefail
         kubectl -n {{ namespace }} create secret tls {{ tls_secret_name }} \
-          --cert=/etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem \
-          --key=/etc/letsencrypt/live/{{ ingress_host }}/privkey.pem \
+          --cert={{ cert_fullchain_path }} \
+          --key={{ cert_privkey_path }} \
           --dry-run=client -o yaml | kubectl apply -f -
       args:
         executable: /bin/bash
-      when: ingress_host | length > 0
+      when: tls_enabled
 
     - name: Render Kubernetes manifest on remote host
       ansible.builtin.template:
