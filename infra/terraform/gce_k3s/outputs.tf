@@ -24,6 +24,6 @@ output "ansible_inventory_line" {
 }
 
 output "service_url_hint" {
-  description = "Expected app URL after deployment (NodePort 30080)"
-  value       = "http://${google_compute_address.k3s_ip.address}:30080"
+  description = "Expected app URL after deployment (ingress on 80/443)"
+  value       = "https://${google_compute_address.k3s_ip.address}/ (fallback: http://${google_compute_address.k3s_ip.address}/)"
 }

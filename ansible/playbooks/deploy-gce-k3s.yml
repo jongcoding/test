@@ -12,10 +12,16 @@
     image_ref_fallback: "{{ (dockerhub_username ~ '/' ~ app_name ~ ':latest') if (dockerhub_username | length > 0) else (app_name ~ ':latest') }}"
     image_ref: "{{ image_ref_env if (image_ref_env | length > 0) else image_ref_fallback }}"
     replicas: "{{ lookup('env', 'REPLICAS') | default('2', true) | int }}"
-    service_type: "{{ lookup('env', 'SERVICE_TYPE') | default('NodePort', true) }}"
+    service_type: "{{ lookup('env', 'SERVICE_TYPE') | default('ClusterIP', true) }}"
     node_port: "{{ lookup('env', 'K3S_NODE_PORT') | default('30080', true) | int }}"
+    domain_env: "{{ lookup('env', 'DOMAIN') | default('', true) | trim }}"
+    ingress_host_env: "{{ lookup('env', 'INGRESS_HOST') | default('', true) | trim }}"
+    ingress_host: "{{ ingress_host_env if (ingress_host_env | length > 0) else domain_env }}"
+    letsencrypt_email: "{{ lookup('env', 'LETSENCRYPT_EMAIL') | default('', true) | trim }}"
+    tls_secret_name: "{{ lookup('env', 'TLS_SECRET_NAME') | default(app_name ~ '-tls', true) }}"
+    certbot_contact_arg: "{{ ('--email ' ~ letsencrypt_email) if (letsencrypt_email | length > 0) else '--register-unsafely-without-email' }}"
     container_port: 5000
-    k3s_install_exec: "--write-kubeconfig-mode 644 --disable traefik"
+    k3s_install_exec: "--write-kubeconfig-mode 644"
 
   pre_tasks:
     - name: Show selected image reference
@@ -23,6 +29,16 @@
         msg:
           - "image_ref={{ image_ref }}"
           - "source={{ 'IMAGE_REF' if (image_ref_env | length > 0) else 'fallback(latest)' }}"
+          - "ingress_host={{ ingress_host if (ingress_host | length > 0) else '<none>' }}"
+          - "service_type={{ service_type }}"
+          - "tls_secret_name={{ tls_secret_name }}"
+          - "certbot_email={{ letsencrypt_email if (letsencrypt_email | length > 0) else '<none>' }}"
+
+    - name: Ensure service type is valid
+      ansible.builtin.assert:
+        that:
+          - service_type in ['ClusterIP', 'NodePort', 'LoadBalancer']
+        fail_msg: "SERVICE_TYPE는 ClusterIP, NodePort, LoadBalancer 중 하나여야 합니다."
 
     - name: Ensure node port range is valid
       ansible.builtin.assert:
@@ -30,6 +46,7 @@
           - node_port >= 30000
           - node_port <= 32767
         fail_msg: "K3S_NODE_PORT는 30000-32767 범위여야 합니다."
+      when: service_type == 'NodePort'
 
   tasks:
     - name: Install required packages
@@ -40,14 +57,93 @@
         state: present
         update_cache: true
 
+    - name: Check whether k3s is installed
+      ansible.builtin.command: bash -lc "command -v k3s"
+      register: k3s_bin
+      failed_when: false
+      changed_when: false
+
     - name: Install k3s if missing
       ansible.builtin.shell: |
         set -euo pipefail
-        if ! command -v k3s >/dev/null 2>&1; then
-          curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="{{ k3s_install_exec }}" sh -
-        fi
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="{{ k3s_install_exec }}" sh -
       args:
         executable: /bin/bash
+      when: k3s_bin.rc != 0
+
+    - name: Detect k3s service option '--disable traefik'
+      ansible.builtin.shell: |
+        set -euo pipefail
+        awk '
+          /--disable(=|[[:space:]]+)traefik/ { found=1 }
+          /--disable/ { disable_line=NR }
+          disable_line && NR <= (disable_line + 3) && /traefik/ { found=1 }
+          END { exit found ? 0 : 1 }
+        ' /etc/systemd/system/k3s.service
+      args:
+        executable: /bin/bash
+      register: k3s_disable_traefik
+      failed_when: false
+      changed_when: false
+      when: k3s_bin.rc == 0
+
+    - name: Reconfigure k3s to enable traefik
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="{{ k3s_install_exec }}" sh -
+      args:
+        executable: /bin/bash
+      when:
+        - k3s_bin.rc == 0
+        - k3s_disable_traefik.rc == 0
+
+    - name: Install certbot package for TLS issuance
+      ansible.builtin.apt:
+        name: certbot
+        state: present
+      when: ingress_host | length > 0
+
+    - name: Issue or renew Let's Encrypt certificate using certbot
+      ansible.builtin.shell: |
+        set -euo pipefail
+        CERT_FILE="/etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem"
+        # 인증서가 30일 이상 유효하면 k3s 다운타임 없이 재발급 스킵
+        if [ -s "$CERT_FILE" ] && openssl x509 -checkend 2592000 -noout -in "$CERT_FILE"; then
+          echo "Existing cert for {{ ingress_host }} is valid for more than 30 days. Skip re-issue."
+          exit 0
+        fi
+        trap 'systemctl start k3s || true' EXIT
+        systemctl stop k3s
+        if command -v k3s-killall.sh >/dev/null 2>&1; then
+          # standalone challenge를 확실히 받기 위해 남아있는 k3s 컨테이너/iptables 규칙 정리
+          k3s-killall.sh || true
+        fi
+        certbot certonly \
+          --standalone \
+          --preferred-challenges http \
+          --non-interactive \
+          --agree-tos \
+          --keep-until-expiring \
+          {{ certbot_contact_arg }} \
+          -d "{{ ingress_host }}"
+        systemctl start k3s
+        trap - EXIT
+      args:
+        executable: /bin/bash
+      when: ingress_host | length > 0
+
+    - name: Ensure certbot certificate files exist
+      ansible.builtin.stat:
+        path: "/etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem"
+      register: certbot_fullchain
+      when: ingress_host | length > 0
+
+    - name: Validate certbot certificate was created
+      ansible.builtin.assert:
+        that:
+          - certbot_fullchain.stat.exists
+        fail_msg: "certbot 인증서 생성 실패: /etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem"
+      when: ingress_host | length > 0
 
     - name: Ensure k3s service is enabled and running
       ansible.builtin.systemd:
@@ -66,6 +162,35 @@
         dest: /usr/local/bin/kubectl
         state: link
         force: true
+
+    - name: Wait until traefik deployment exists
+      ansible.builtin.command: kubectl -n kube-system get deployment traefik
+      register: traefik_exists
+      changed_when: false
+      retries: 24
+      delay: 5
+      until: traefik_exists.rc == 0
+
+    - name: Wait for traefik rollout
+      ansible.builtin.command: kubectl -n kube-system rollout status deployment/traefik --timeout=240s
+
+    - name: Ensure target namespace exists before TLS secret apply
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl create namespace {{ namespace }} --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+
+    - name: Upsert Kubernetes TLS secret from certbot output
+      ansible.builtin.shell: |
+        set -euo pipefail
+        kubectl -n {{ namespace }} create secret tls {{ tls_secret_name }} \
+          --cert=/etc/letsencrypt/live/{{ ingress_host }}/fullchain.pem \
+          --key=/etc/letsencrypt/live/{{ ingress_host }}/privkey.pem \
+          --dry-run=client -o yaml | kubectl apply -f -
+      args:
+        executable: /bin/bash
+      when: ingress_host | length > 0
 
     - name: Render Kubernetes manifest on remote host
       ansible.builtin.template:
@@ -91,5 +216,7 @@
     - name: Show access hint
       ansible.builtin.debug:
         msg:
-          - "Access URL: http://{{ inventory_hostname }}:{{ node_port }}"
-          - "If 외부에서 접근 시, GCE firewall에서 nodePort(기본 30080) 허용 필요"
+          - "Access URL (HTTP): http://{{ ingress_host if (ingress_host | length > 0) else inventory_hostname }}/"
+          - "Access URL (HTTPS): https://{{ ingress_host if (ingress_host | length > 0) else inventory_hostname }}/"
+          - "TLS Secret: {{ tls_secret_name if (ingress_host | length > 0) else 'N/A (host 미설정)' }}"
+          - "80/443은 traefik ingress를 통해 서비스됩니다."

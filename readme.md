@@ -21,8 +21,9 @@ Flask 앱을 GCE VM 1대 위에 k3s로 배포하는 교육용 레포입니다.
 - `APP_NAME` (선택, 기본 `flask-app`)
 - `K8S_NAMESPACE` (선택, 기본 `flask-app`)
 - `REPLICAS` (선택, 기본 `2`)
-- `SERVICE_TYPE` (선택, 기본 `NodePort`)
-- `K3S_NODE_PORT` (선택, 기본 `30080`)
+- `SERVICE_TYPE` (선택, 기본 `ClusterIP`, ingress 모드 권장)
+- `K3S_NODE_PORT` (선택, `SERVICE_TYPE=NodePort`일 때만 사용, 기본 `30080`)
+- `TLS_SECRET_NAME` (선택, 기본 `<APP_NAME>-tls`)
 
 ## 3) GitHub Secrets
 
@@ -35,6 +36,7 @@ Flask 앱을 GCE VM 1대 위에 k3s로 배포하는 교육용 레포입니다.
 - `DOCKERHUB_USERNAME`
 - `DOCKERHUB_TOKEN`
 - `DOMAIN` (DAST 타깃 도메인)
+- `LETSENCRYPT_EMAIL` (권장, certbot ACME 등록 이메일)
 
 ## 4) 실행 순서
 
@@ -47,7 +49,7 @@ Flask 앱을 GCE VM 1대 위에 k3s로 배포하는 교육용 레포입니다.
 ### Step B. 앱 배포
 
 1. `Actions > CD - Build & Deploy to GCE k3s` 실행
-2. 성공 후 접속: `http://<GCP_HOST>:30080`
+2. 성공 후 접속: `https://<DOMAIN>/` 또는 `https://<GCP_HOST>/`
 
 ### Step C. 검증
 
@@ -64,7 +66,8 @@ cp ansible/inventory/gce_k3s.ini.example ansible/inventory/gce_k3s.ini
 # <GCE_IP> ansible_user=ubuntu
 
 IMAGE_REF="<dockerhub-user>/flask-app:<tag>" \
-K3S_NODE_PORT=30080 \
+DOMAIN="<your-domain>" \
+LETSENCRYPT_EMAIL="you@example.com" \
 ANSIBLE_CONFIG=ansible/ansible.cfg \
 ansible-playbook -i ansible/inventory/gce_k3s.ini ansible/playbooks/deploy-gce-k3s.yml
 

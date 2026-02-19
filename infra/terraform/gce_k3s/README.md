@@ -3,7 +3,7 @@
 이 디렉터리는 교육용으로 아래 리소스를 만듭니다.
 
 - VPC/Subnet
-- Firewall (SSH + HTTP/HTTPS + NodePort 30000-32767)
+- Firewall (SSH + HTTP/HTTPS ingress + optional NodePort 30000-32767)
 - Static External IP
 - Ubuntu VM 1대 (k3s 설치 대상)
 

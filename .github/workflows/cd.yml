@@ -1,8 +1,9 @@
-name: CD - Build & Deploy to GCE k3s
+name: CD - Build, Push & Deploy to GCE k3s
 
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*.*.*' ]
   workflow_dispatch:
 
 permissions:
@@ -10,50 +11,29 @@ permissions:
 
 env:
   IMAGE_NAME: flask-app
-  GCP_HOST: ${{ secrets.GCP_HOST }}
-  GCP_USER: ${{ secrets.GCP_USER }}
-  REMOTE_APP_DIR: ${{ secrets.REMOTE_APP_DIR }}
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
     outputs:
-      image_ref: ${{ steps.meta.outputs.image_ref }}
-      image_digest: ${{ steps.build.outputs.digest }}
+      image-tags: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Validate required variables/secrets
+      - name: Validate build secrets
         run: |
           set -euo pipefail
-
-          required_vars=(GCP_HOST GCP_USER)
-          for v in "${required_vars[@]}"; do
-            if [ -z "${!v:-}" ]; then
-              echo "ERROR: GitHub Secret/Variable '$v' is empty." >&2
-              exit 1
-            fi
-          done
-
           if [ -z "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
             echo "ERROR: Secret 'DOCKERHUB_USERNAME' is empty." >&2
             exit 1
           fi
-
           if [ -z "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
             echo "ERROR: Secret 'DOCKERHUB_TOKEN' is empty." >&2
             exit 1
           fi
-
-          if [ -z "${{ secrets.GCP_SSH_KEY }}" ]; then
-            echo "ERROR: Secret 'GCP_SSH_KEY' is empty." >&2
-            exit 1
-          fi
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -61,35 +41,152 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Compute image tags
+      - name: Extract image metadata
         id: meta
-        run: |
-          set -euo pipefail
-          IMAGE_REF="${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:${GITHUB_SHA}"
-          IMAGE_LATEST="${{ secrets.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:latest"
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
 
-          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
-          echo "image_latest=${IMAGE_LATEST}" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push image
+      - name: Build & Push image
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           push: true
-          tags: |
-            ${{ steps.meta.outputs.image_ref }}
-            ${{ steps.meta.outputs.image_latest }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  deploy:
+  security-gate:
     needs: build-and-push
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    env:
+      IMG: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.image-digest }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+
+      - name: Trivy image scan (HIGH/CRIT fail)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMG }}
+          pkg-types: 'os,library'
+          severity: 'HIGH,CRITICAL'
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: '1'
+          scanners: 'vuln'
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
+
+      - name: Trivy JSON (for SeveritySource)
+        if: always()
+        run: |
+          trivy image --scanners vuln \
+            --pkg-types os,library \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --detection-priority precise \
+            -f json -o trivy-image.json "${IMG}" || true
+
+      - name: Upload Trivy JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-json
+          path: trivy-image.json
+          retention-days: 7
+
+      - name: Login to Docker Hub (for cosign push)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMG }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.9.2
+
+      - name: Cosign sign & attest (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMG"
+          cosign attest --yes --predicate sbom.spdx.json --type spdx "$IMG"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-spdx
+          path: sbom.spdx.json
+          retention-days: 30
+
+  deploy:
+    needs: [ build-and-push, security-gate ]
+    runs-on: ubuntu-latest
+    env:
+      GCP_HOST: ${{ secrets.GCP_HOST }}
+      GCP_USER: ${{ secrets.GCP_USER }}
+      DOMAIN: ${{ secrets.DOMAIN }}
+      LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
+      IMG: ${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}@${{ needs.build-and-push.outputs.image-digest }}
+      K3S_NODE_PORT: ${{ vars.K3S_NODE_PORT }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate deploy secrets
+        run: |
+          set -euo pipefail
+          required=(GCP_HOST GCP_USER IMG)
+          for v in "${required[@]}"; do
+            if [ -z "${!v:-}" ]; then
+              echo "ERROR: Required env '$v' is empty." >&2
+              exit 1
+            fi
+          done
+          if [ -z "${{ secrets.GCP_SSH_KEY }}" ]; then
+            echo "ERROR: Secret 'GCP_SSH_KEY' is empty." >&2
+            exit 1
+          fi
+          if [ -n "${DOMAIN:-}" ] && [ -z "${LETSENCRYPT_EMAIL:-}" ]; then
+            echo "WARN: DOMAIN is set but LETSENCRYPT_EMAIL is empty. certbot will use no-email registration." >&2
+          fi
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.9.2
+
+      - name: Verify image signature (keyless)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}(/|@).*" \
+            "${IMG}" >/dev/null
+          echo "Cosign verify OK for ${IMG}"
 
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.9.0
@@ -99,7 +196,13 @@ jobs:
       - name: Add host key
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H "$GCP_HOST" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "$GCP_HOST" >> ~/.ssh/known_hosts 2>/dev/null || true
+          if [ -n "${{ secrets.GCP_HOST_KEY }}" ]; then
+            echo "${{ secrets.GCP_HOST_KEY }}" >> ~/.ssh/known_hosts
+          fi
+
+      - name: Test SSH
+        run: ssh -o ConnectTimeout=10 "$GCP_USER@$GCP_HOST" "echo OK"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -118,28 +221,14 @@ jobs:
           ${GCP_HOST} ansible_user=${GCP_USER}
           EOF_INV
 
-      - name: Resolve image reference
-        id: image_ref
-        env:
-          IMAGE_REF_FROM_BUILD: ${{ needs.build-and-push.outputs.image_ref }}
-          IMAGE_DIGEST: ${{ needs.build-and-push.outputs.image_digest }}
-          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-        run: |
-          set -euo pipefail
-          if [ -n "${IMAGE_DIGEST:-}" ]; then
-            REF="${DOCKERHUB_USERNAME}/${IMAGE_NAME}@${IMAGE_DIGEST}"
-          elif [ -n "${IMAGE_REF_FROM_BUILD:-}" ]; then
-            REF="${IMAGE_REF_FROM_BUILD}"
-          else
-            REF="${DOCKERHUB_USERNAME}/${IMAGE_NAME}:${GITHUB_SHA}"
-          fi
-          echo "ref=${REF}" >> "$GITHUB_OUTPUT"
-          echo "Using IMAGE_REF=${REF}"
-
       - name: Deploy k3s workload with Ansible
         env:
-          IMAGE_REF: ${{ steps.image_ref.outputs.ref }}
+          IMAGE_REF: ${{ env.IMG }}
           DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+          INGRESS_HOST: ${{ secrets.DOMAIN }}
+          LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
+          TLS_SECRET_NAME: ${{ vars.TLS_SECRET_NAME }}
           APP_NAME: ${{ vars.APP_NAME }}
           K8S_NAMESPACE: ${{ vars.K8S_NAMESPACE }}
           REPLICAS: ${{ vars.REPLICAS }}
@@ -148,3 +237,35 @@ jobs:
         run: |
           ANSIBLE_CONFIG=ansible/ansible.cfg \
           ansible-playbook -i ansible/inventory/gce_k3s.ini ansible/playbooks/deploy-gce-k3s.yml
+
+      - name: Verify app endpoint (80/443 via ingress)
+        run: |
+          set -euo pipefail
+          HOST="${DOMAIN:-$GCP_HOST}"
+          for i in $(seq 1 24); do
+            if curl -kfsS -m 5 -o /dev/null "https://${HOST}/"; then
+              echo "App OK (HTTPS): https://${HOST}/"
+              exit 0
+            fi
+            if curl -fsS -m 5 -o /dev/null "http://${HOST}/"; then
+              echo "App OK (HTTP): http://${HOST}/"
+              exit 0
+            fi
+            echo "...waiting ingress (${i}/24)"
+            sleep 5
+          done
+          echo "ERROR: Ingress endpoint did not become ready in time (host=${HOST})" >&2
+          exit 1
+
+  notify:
+    needs: [ build-and-push, deploy ]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Success notice
+        if: success()
+        run: echo "Deployed to ${{ secrets.GCP_HOST }}"
+
+      - name: Failure notice
+        if: failure()
+        run: echo "Deployment to ${{ secrets.GCP_HOST }} failed"
