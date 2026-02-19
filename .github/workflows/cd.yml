@@ -15,7 +15,6 @@ jobs:
     outputs:
       image_tags: ${{ steps.meta.outputs.tags }}
       image_digest: ${{ steps.build.outputs.digest }}
-      image_ref: ${{ steps.image_ref.outputs.value }}
 
     steps:
       - uses: actions/checkout@v4
@@ -60,10 +59,13 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Export image reference
-        id: image_ref
+      - name: Validate image digest output
         run: |
-          echo "value=${{ secrets.DOCKERHUB_USERNAME }}/flask-app@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [ -z "${{ steps.build.outputs.digest }}" ]; then
+            echo "ERROR: build.outputs.digest is empty." >&2
+            exit 1
+          fi
 
   security_gate:
     needs: build_and_push
@@ -73,7 +75,8 @@ jobs:
       id-token: write
       security-events: write
     env:
-      IMG: ${{ needs.build_and_push.outputs.image_ref }}
+      IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
+      IMG: ${{ secrets.DOCKERHUB_USERNAME }}/flask-app@${{ needs.build_and_push.outputs.image_digest }}
 
     steps:
       - uses: actions/checkout@v4
@@ -81,8 +84,12 @@ jobs:
       - name: Validate security-gate inputs
         run: |
           set -euo pipefail
+          if [ -z "${IMAGE_DIGEST:-}" ]; then
+            echo "ERROR: IMAGE_DIGEST is empty. Check build_and_push outputs.image_digest." >&2
+            exit 1
+          fi
           if [ -z "${IMG:-}" ]; then
-            echo "ERROR: IMG is empty. Check build_and_push outputs.image_ref." >&2
+            echo "ERROR: IMG is empty. Check DOCKERHUB_USERNAME and IMAGE_DIGEST." >&2
             exit 1
           fi
 
@@ -161,7 +168,8 @@ jobs:
       GCP_USER: ${{ secrets.GCP_USER }}
       DOMAIN: ${{ secrets.DOMAIN }}
       LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
-      IMG: ${{ needs.build_and_push.outputs.image_ref }}
+      IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
+      IMG: ${{ secrets.DOCKERHUB_USERNAME }}/flask-app@${{ needs.build_and_push.outputs.image_digest }}
       K3S_NODE_PORT: ${{ vars.K3S_NODE_PORT }}
 
     steps:
