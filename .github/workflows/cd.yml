@@ -10,12 +10,12 @@ permissions:
   contents: read
 
 jobs:
-  build-and-push:
+  build_and_push:
     runs-on: ubuntu-latest
     outputs:
-      image-tags: ${{ steps.meta.outputs.tags }}
-      image-digest: ${{ steps.build.outputs.digest }}
-      image-ref: ${{ steps.image_ref.outputs.value }}
+      image_tags: ${{ steps.meta.outputs.tags }}
+      image_digest: ${{ steps.build.outputs.digest }}
+      image_ref: ${{ steps.image_ref.outputs.value }}
 
     steps:
       - uses: actions/checkout@v4
@@ -65,18 +65,26 @@ jobs:
         run: |
           echo "value=${{ secrets.DOCKERHUB_USERNAME }}/flask-app@${{ steps.build.outputs.digest }}" >> "$GITHUB_OUTPUT"
 
-  security-gate:
-    needs: build-and-push
+  security_gate:
+    needs: build_and_push
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
       security-events: write
     env:
-      IMG: ${{ needs.build-and-push.outputs.image-ref }}
+      IMG: ${{ needs.build_and_push.outputs.image_ref }}
 
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate security-gate inputs
+        run: |
+          set -euo pipefail
+          if [ -z "${IMG:-}" ]; then
+            echo "ERROR: IMG is empty. Check build_and_push outputs.image_ref." >&2
+            exit 1
+          fi
 
       - name: Trivy image scan (HIGH/CRIT fail)
         uses: aquasecurity/trivy-action@0.28.0
@@ -91,7 +99,7 @@ jobs:
           scanners: 'vuln'
 
       - name: Upload Trivy SARIF
-        if: always()
+        if: ${{ always() && hashFiles('trivy-image.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-image.sarif
@@ -107,7 +115,7 @@ jobs:
             -f json -o trivy-image.json "${IMG}" || true
 
       - name: Upload Trivy JSON
-        if: always()
+        if: ${{ always() && hashFiles('trivy-image.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: trivy-image-json
@@ -146,14 +154,14 @@ jobs:
           retention-days: 30
 
   deploy:
-    needs: [ build-and-push, security-gate ]
+    needs: [ build_and_push, security_gate ]
     runs-on: ubuntu-latest
     env:
       GCP_HOST: ${{ secrets.GCP_HOST }}
       GCP_USER: ${{ secrets.GCP_USER }}
       DOMAIN: ${{ secrets.DOMAIN }}
       LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
-      IMG: ${{ needs.build-and-push.outputs.image-ref }}
+      IMG: ${{ needs.build_and_push.outputs.image_ref }}
       K3S_NODE_PORT: ${{ vars.K3S_NODE_PORT }}
 
     steps:
@@ -261,7 +269,7 @@ jobs:
           exit 1
 
   notify:
-    needs: [ build-and-push, deploy ]
+    needs: [ build_and_push, deploy ]
     runs-on: ubuntu-latest
     if: always()
     steps:
